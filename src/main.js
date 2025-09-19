@@ -33,6 +33,7 @@ const appState = {
   },
   selectionFilter: "all",
   selectionMessageTimeout: null,
+
 };
 
 const stateEvents = new Map();
@@ -96,6 +97,7 @@ const customLabelInput = document.getElementById("custom-label");
 const xrayToggle = document.getElementById("xray-toggle");
 const selectionFilter = document.getElementById("selection-filter");
 
+
 const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
 let gizmoEntities = [];
 
@@ -117,6 +119,7 @@ if (selectionFilter) {
   selectionFilter.value = appState.selectionFilter;
 }
 updateSelectionFilterMessage();
+
 
 function updateModeIndicator() {
   const labels = {
@@ -358,6 +361,7 @@ function handlePropertyFormInput(event) {
   applyMaterial(entity, { selected: true, force: true });
 }
 
+
 function createCube(position, options = {}) {
   const id = ++objectCounter;
   const name = `Cube_${id}`;
@@ -391,6 +395,7 @@ function createCube(position, options = {}) {
 
   appState.objects.set(name, cubeEntity);
   applyMaterial(cubeEntity, { selected: true, force: true });
+
   focusOnEntity(cubeEntity);
   setSelectedObject(cubeEntity);
   openParameterPanel();
@@ -463,6 +468,7 @@ function setSelectedObject(entity) {
     hidePanels();
     removeGizmo();
     updatePropertyPanel(null);
+
     emitStateEvent("selection", { entity: null, selected: false });
   }
 }
@@ -473,6 +479,7 @@ function highlightEntity(entity) {
 
 function restoreDefaultMaterial(entity) {
   applyMaterial(entity, { selected: false, force: true });
+
 }
 
 function openParameterPanel() {
@@ -514,6 +521,7 @@ function updatePanels(entity) {
   transformForm.transformScaleY.value = (dimensions.y / defaultCubeConfig.dimensions.y).toFixed(2);
   transformForm.transformScaleZ.value = (dimensions.z / defaultCubeConfig.dimensions.z).toFixed(2);
   updatePropertyPanel(entity);
+
 }
 
 function removeGizmo() {
@@ -781,6 +789,7 @@ if (selectionFilter) {
   });
 }
 
+
 transformForm.addEventListener("submit", (event) => {
   event.preventDefault();
   if (!appState.selectedObject) return;
@@ -837,6 +846,7 @@ function handleSelection(click) {
     } else {
       showSelectionFilteredHint();
     }
+
   } else {
     setSelectedObject(null);
   }
