@@ -15,6 +15,7 @@
 
 html,
 body {
+
   height: 100%;
 }
 
@@ -25,6 +26,7 @@ body {
   color: var(--text-light);
   min-height: 100vh;
   overflow: hidden;
+
 }
 
 #app {
@@ -32,6 +34,7 @@ body {
   flex-direction: column;
   height: 100%;
   min-height: 100vh;
+
 }
 
 .menu-bar {
@@ -276,6 +279,7 @@ main {
   font-weight: 700;
   color: rgba(199, 210, 254, 0.95);
 }
+
 
 .toolbar-item {
   display: flex;
@@ -529,6 +533,7 @@ input[type="color"] {
 .modifier-params input[type="range"] {
   width: 10rem;
 }
+
 
 .panel.hidden {
   display: none;

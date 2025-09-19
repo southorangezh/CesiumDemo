@@ -53,6 +53,7 @@ const appState = {
   proportionalIndicator: null,
   cameraNavigationActive: false,
   modifierCounter: 0,
+
 };
 
 const stateEvents = new Map();
@@ -129,6 +130,7 @@ const modifierTemplate = document.getElementById("modifier-template");
 const modifierAddButton = document.getElementById("modifier-add");
 const modifierList = document.getElementById("modifier-list");
 
+
 const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
 let gizmoEntities = [];
 
@@ -196,6 +198,7 @@ const MODIFIER_LIBRARY = {
   },
 };
 
+
 if (xrayToggle) {
   xrayToggle.checked = appState.viewSettings.xray;
 }
@@ -262,6 +265,7 @@ function computeProportionalWeight(distance, radius) {
   return t * t * (3 - 2 * t);
 }
 
+
 function updateModeIndicator() {
   const labels = {
     view: "视图",
@@ -273,6 +277,7 @@ function updateModeIndicator() {
   const label = labels[appState.mode] || appState.mode;
   const scope = appState.objectMode === "edit" ? "编辑" : "对象";
   modeIndicator.textContent = `模式：${scope} · ${label}`;
+
 }
 
 function updateAxisIndicator() {
@@ -284,6 +289,7 @@ function updateAxisIndicator() {
       ? `${appState.axisMode.toUpperCase()} 平面`
       : appState.axisMode.toUpperCase();
     axisIndicator.textContent = `轴向：${label} (${space})`;
+
   }
   emitStateEvent("axis", { axis: appState.axisMode, space: appState.axisSpace });
 }
@@ -336,6 +342,7 @@ function getAxisVector(axis, space, entity) {
   }
 
   const enu = getEastNorthUpMatrix(getEntityPosition(entity));
+
   const vector = Cesium.Matrix4.getColumn(enu, axis === "x" ? 0 : axis === "y" ? 1 : 2, new Cesium.Cartesian3());
   return Cesium.Cartesian3.normalize(vector, vector);
 }
@@ -387,6 +394,7 @@ function computeWorldDirectionFromSigns(signs, entity) {
 function computeSignsMagnitude(signs) {
   return Math.sqrt((signs.x || 0) ** 2 + (signs.y || 0) ** 2 + (signs.z || 0) ** 2) || 1;
 }
+
 
 function colorToHex(color) {
   if (!color) return "#ffffff";
@@ -477,6 +485,7 @@ function applyMaterial(entity, options = {}) {
   const baseOpacityValue = metadata.runtimeOpacity ?? metadata.opacity ?? baseColor.alpha ?? 0.8;
   const baseOpacity = Cesium.Math.clamp(baseOpacityValue, 0.05, 1.0);
 
+
   let finalAlpha = baseOpacity;
   if (appState.viewSettings.xray) {
     finalAlpha = Math.min(finalAlpha, 0.35);
@@ -498,6 +507,7 @@ function refreshAllMaterials() {
   appState.objects.forEach((entity) => {
     const isSelected = entity === appState.selectedObject && !appState.transformSession;
     applyModifiers(entity);
+
     applyMaterial(entity, { selected: isSelected, force: true });
   });
 }
@@ -547,6 +557,7 @@ function applyModifiers(entity) {
   metadata.runtimeOpacity = workingOpacity;
 }
 
+
 function updatePropertyPanel(entity) {
   if (!propertyPanel) return;
   if (!entity) {
@@ -555,6 +566,7 @@ function updatePropertyPanel(entity) {
     propertyName.textContent = "";
     propertyId.textContent = "";
     renderModifierList(null);
+
     return;
   }
 
@@ -582,6 +594,7 @@ function updatePropertyPanel(entity) {
   fillEnabledInput.checked = metadata.fillEnabled !== false;
   customLabelInput.value = metadata.label || "";
   renderModifierList(entity);
+
 }
 
 function isSelectionAllowed(entity) {
@@ -706,6 +719,7 @@ function renderModifierList(entity) {
   });
 }
 
+
 function handlePropertyFormInput(event) {
   if (!appState.selectedObject) return;
   const entity = appState.selectedObject;
@@ -743,6 +757,7 @@ function handlePropertyFormInput(event) {
   applyMaterial(entity, { selected: true, force: true });
 }
 
+
 function createCube(position, options = {}) {
   const id = ++objectCounter;
   const name = `Cube_${id}`;
@@ -778,6 +793,7 @@ function createCube(position, options = {}) {
   appState.objects.set(name, cubeEntity);
   applyModifiers(cubeEntity);
   applyMaterial(cubeEntity, { selected: true, force: true });
+
   focusOnEntity(cubeEntity);
   setSelectedObject(cubeEntity);
   openParameterPanel();
@@ -1243,6 +1259,7 @@ function setSelectedObject(entity) {
       rebuildComponentOverlays(entity, { preserveSelection: true });
       updateProportionalIndicator();
     }
+
     return;
   }
 
@@ -1251,6 +1268,7 @@ function setSelectedObject(entity) {
     restoreDefaultMaterial(appState.selectedObject);
   }
   clearComponentSelection();
+
 
   appState.selectedObject = entity;
 
@@ -1264,12 +1282,14 @@ function setSelectedObject(entity) {
       rebuildComponentOverlays(entity);
     }
     updateProportionalIndicator();
+
     emitStateEvent("selection", { entity, selected: true });
   } else {
     hidePanels();
     removeGizmo();
     updatePropertyPanel(null);
     updateProportionalIndicator();
+
     emitStateEvent("selection", { entity: null, selected: false });
   }
 }
@@ -1280,6 +1300,7 @@ function highlightEntity(entity) {
 
 function restoreDefaultMaterial(entity) {
   applyMaterial(entity, { selected: false, force: true });
+
 }
 
 function openParameterPanel() {
@@ -1301,6 +1322,7 @@ function updatePanels(entity) {
   const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
   const dimensions = entity.box.dimensions.getValue(julianNow);
   const orientation = Cesium.Quaternion.clone(getEntityOrientation(entity, julianNow));
+
   const hpr = Cesium.HeadingPitchRoll.fromQuaternion(orientation);
 
   parameterForm.width.value = dimensions.x.toFixed(2);
@@ -1321,6 +1343,7 @@ function updatePanels(entity) {
   transformForm.transformScaleY.value = (dimensions.y / defaultCubeConfig.dimensions.y).toFixed(2);
   transformForm.transformScaleZ.value = (dimensions.z / defaultCubeConfig.dimensions.z).toFixed(2);
   updatePropertyPanel(entity);
+
 }
 
 function removeGizmo() {
@@ -1332,6 +1355,7 @@ function removeGizmo() {
 function computeAxisEndpoints(entity, axis, length = 20.0) {
   const julianNow = Cesium.JulianDate.now();
   const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
+
   const baseMatrix = getEastNorthUpMatrix(position);
   const index = axis === "x" ? 0 : axis === "y" ? 1 : 2;
   const axisVector = Cesium.Matrix4.getColumn(baseMatrix, index, new Cesium.Cartesian3());
@@ -1416,6 +1440,7 @@ function refreshGizmoHighlight() {
       : [appState.axisMode];
   Object.entries(appState.gizmo.axes).forEach(([axis, data]) => {
     const active = activeAxes.includes(axis);
+
     data.polyline.polyline.width = active ? 6 : 3;
     data.polyline.polyline.material = active
       ? data.color.withAlpha(1.0)
@@ -1428,6 +1453,7 @@ function updateRotationBasis(session) {
   const { entity } = session;
   const julianNow = Cesium.JulianDate.now();
   const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
+
   const axisKey = session.activeAxis && session.activeAxis !== "none" ? session.activeAxis : "z";
   const axisVector = Cesium.Cartesian3.normalize(
     getAxisVector(axisKey, session.axisSpace, entity),
@@ -1648,6 +1674,7 @@ setComponentMode(appState.componentMode);
 updateProportionalRadius(appState.proportionalRadius);
 toggleProportionalEditing(appState.proportionalEditing);
 
+
 transformForm.addEventListener("submit", (event) => {
   event.preventDefault();
   if (!appState.selectedObject) return;
@@ -1710,12 +1737,14 @@ function handleSelection(click) {
     setComponentSelection(component);
     return;
   }
+
   if (Cesium.defined(picked) && picked.id && picked.id.box) {
     if (isSelectionAllowed(picked.id)) {
       setSelectedObject(picked.id);
     } else {
       showSelectionFilteredHint();
     }
+
   } else {
     setSelectedObject(null);
   }
@@ -1729,6 +1758,7 @@ handler.setInputAction((movement) => {
     performRotate(movement);
   } else if (appState.mode === "scale") {
     performScale(movement);
+
   }
 }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
@@ -1771,6 +1801,7 @@ function beginTransform(mode) {
     initialOrientation: Cesium.Quaternion.clone(getEntityOrientation(entity, julianNow)),
     initialDimensions,
     activeAxis,
+
     axisSpace: appState.axisSpace,
     isShift: false,
     isCtrl: false,
@@ -1807,6 +1838,7 @@ function beginTransform(mode) {
     }
   }
 
+
   const baseColor = entity.box.material.getValue(julianNow);
   entity.box.material = new Cesium.ColorMaterialProperty(baseColor.withAlpha(0.4));
   setMode(mode);
@@ -1836,6 +1868,7 @@ function commitTransform() {
     rebuildComponentOverlays(entity, { preserveSelection: true });
     updateProportionalIndicator();
   }
+
   emitStateEvent("transform", { phase: "commit", entity });
 }
 
@@ -1852,6 +1885,7 @@ function cancelTransform() {
       initialDimensions.z
     );
   }
+
   clearRotationFeedback(appState.transformSession);
   restoreDefaultMaterial(entity);
   appState.transformSession = null;
@@ -1867,6 +1901,7 @@ function cancelTransform() {
     rebuildComponentOverlays(entity);
     updateProportionalIndicator();
   }
+
   emitStateEvent("transform", { phase: "cancel", entity });
 }
 
@@ -1883,6 +1918,7 @@ function setMode(mode) {
 function computeDragPlane(entity, axis, axisSpace = appState.axisSpace) {
   const julian = Cesium.JulianDate.now();
   const position = getEntityPosition(entity, julian, new Cesium.Cartesian3());
+
   if (!axis || axis === "none") {
     const normal = getSurfaceNormal(position);
     return Cesium.Plane.fromPointNormal(position, normal);
@@ -1897,6 +1933,7 @@ function computeDragPlane(entity, axis, axisSpace = appState.axisSpace) {
     return Cesium.Plane.fromPointNormal(position, normalVector);
   }
   const axisVector = getAxisVector(axis, axisSpace, entity);
+
   const cameraDir = Cesium.Cartesian3.normalize(
     Cesium.Cartesian3.negate(viewer.camera.direction, new Cesium.Cartesian3()),
     new Cesium.Cartesian3()
@@ -1933,6 +1970,7 @@ function performTranslate(movement) {
   const entity = session.entity;
   const plane = computeDragPlane(entity, session.activeAxis, session.axisSpace);
   const ray = viewer.camera.getPickRay(movement.endPosition);
+
   if (!Cesium.defined(ray)) return;
   const t = Cesium.IntersectionTests.rayPlane(ray, plane);
   if (!Cesium.defined(t)) return;
@@ -1959,6 +1997,7 @@ function performTranslate(movement) {
       );
       direction = projected;
     }
+
   }
 
   if (session.isShift) {
@@ -1972,6 +2011,7 @@ function performTranslate(movement) {
   if (Cesium.Cartesian3.magnitude(direction) > Cesium.Math.EPSILON7) {
     session.lastDirection = Cesium.Cartesian3.normalize(direction, new Cesium.Cartesian3());
   }
+
   const newPosition = Cesium.Cartesian3.add(session.initialPosition, direction, new Cesium.Cartesian3());
   entity.position = new Cesium.ConstantPositionProperty(newPosition);
   updatePanels(entity);
@@ -1979,12 +2019,14 @@ function performTranslate(movement) {
 }
 
 function performRotate(movement) {
+
   const session = appState.transformSession;
   if (!session) return;
   const entity = session.entity;
   const axisKey = session.activeAxis && session.activeAxis !== "none" ? session.activeAxis : "z";
   const axisVector = getAxisVector(axisKey, session.axisSpace, entity);
   const delta = computeCursorDelta(movement.startPosition, movement.endPosition);
+
   const angle = Cesium.Math.toRadians(delta.x * 0.25);
   let finalAngle = angle;
   if (session.isCtrl) {
@@ -2042,6 +2084,7 @@ function performScale(movement) {
   }
   const entity = session.entity;
   const delta = computeCursorDelta(movement.startPosition, movement.endPosition);
+
   let scaleFactor = 1 + delta.y * -0.005;
   if (session.isShift) {
     scaleFactor = 1 + (delta.y * -0.0025);
@@ -2128,6 +2171,7 @@ function applyNumericInput() {
       } else {
         axisVector = getAxisVector(session.activeAxis, session.axisSpace, entity);
       }
+
     } else if (session.lastDirection) {
       axisVector = session.lastDirection;
     } else {
@@ -2188,6 +2232,7 @@ function handleKeyDown(event) {
     return;
   }
 
+
   if (event.shiftKey && key.toLowerCase() === "a") {
     event.preventDefault();
     showAddMenu();
@@ -2228,6 +2273,7 @@ function handleKeyDown(event) {
     return;
   }
 
+
   if (appState.menuPinned && !appState.transformSession) {
     const lower = key.toLowerCase();
     if (lower === "m") {
@@ -2248,6 +2294,7 @@ function handleKeyDown(event) {
     const usingPlane = event.shiftKey && !event.ctrlKey && !event.altKey;
     const targetMode = usingPlane ? PLANE_AXIS_MAP[baseAxis] : baseAxis;
     if (appState.axisMode === targetMode) {
+
       appState.axisSpace = appState.axisSpace === "global" ? "local" : "global";
     } else {
       appState.axisSpace = "global";
@@ -2261,6 +2308,7 @@ function handleKeyDown(event) {
         appliedAxis = "none";
       }
       appState.transformSession.activeAxis = appliedAxis;
+
       appState.transformSession.axisSpace = appState.axisSpace;
       if (appState.transformSession.mode === "rotate") {
         updateRotationBasis(appState.transformSession);
@@ -2279,6 +2327,7 @@ function handleKeyDown(event) {
     toggleProportionalEditing();
     return;
   }
+
 
   if (appState.transformSession) {
     if (key === "Shift") {
@@ -2362,6 +2411,7 @@ canvas.addEventListener(
   },
   { passive: false }
 );
+
 
 viewer.scene.postRender.addEventListener(() => {
   if (appState.selectedObject) {
