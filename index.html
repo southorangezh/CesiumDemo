@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cesium Cube Studio</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/cesium@1.133.0/Build/Cesium/Widgets/widgets.css"
+    />
+    <link rel="stylesheet" href="src/styles.css" />
+    <script>
+      window.CESIUM_BASE_URL = "https://cdn.jsdelivr.net/npm/cesium@1.133.0/Build/Cesium/";
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/cesium@1.133.0/Build/Cesium/Cesium.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <header class="menu-bar">
+        <div class="menu-item" data-menu="add">
+          Add
+          <div class="submenu">
+            <div class="submenu-item" data-submenu="mesh">
+              Mesh
+              <div class="submenu">
+                <button class="action-button" data-action="create-cube">Cube</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="menu-hint">Shift + A 打开添加菜单</div>
+      </header>
+      <main>
+        <div id="cesiumContainer"></div>
+        <section id="parameter-panel" class="panel hidden">
+          <header>
+            <h2>立方体参数</h2>
+            <button id="parameter-close" aria-label="关闭参数面板">×</button>
+          </header>
+          <form id="parameter-form">
+            <fieldset>
+              <legend>尺寸 (m)</legend>
+              <label>Width <input type="number" step="0.1" name="width" /></label>
+              <label>Height <input type="number" step="0.1" name="height" /></label>
+              <label>Depth <input type="number" step="0.1" name="depth" /></label>
+            </fieldset>
+            <fieldset>
+              <legend>位置 (米)</legend>
+              <label>X <input type="number" step="0.1" name="posX" /></label>
+              <label>Y <input type="number" step="0.1" name="posY" /></label>
+              <label>Z <input type="number" step="0.1" name="posZ" /></label>
+            </fieldset>
+            <button type="submit">应用</button>
+          </form>
+        </section>
+        <section id="transform-panel" class="panel hidden">
+          <header>
+            <h2>Transform</h2>
+          </header>
+          <form id="transform-form">
+            <label>Position X <input type="number" name="transformPosX" step="0.1" /></label>
+            <label>Position Y <input type="number" name="transformPosY" step="0.1" /></label>
+            <label>Position Z <input type="number" name="transformPosZ" step="0.1" /></label>
+            <label>Rotation Heading <input type="number" name="transformHeading" step="1" /></label>
+            <label>Rotation Pitch <input type="number" name="transformPitch" step="1" /></label>
+            <label>Rotation Roll <input type="number" name="transformRoll" step="1" /></label>
+            <label>Scale X <input type="number" name="transformScaleX" step="0.1" /></label>
+            <label>Scale Y <input type="number" name="transformScaleY" step="0.1" /></label>
+            <label>Scale Z <input type="number" name="transformScaleZ" step="0.1" /></label>
+            <button type="submit">更新</button>
+          </form>
+        </section>
+        <section id="scene-toolbar" aria-label="视图与选择控制">
+          <label class="toolbar-item">
+            <input type="checkbox" id="xray-toggle" /> X-Ray 透视
+          </label>
+          <label class="toolbar-item">
+            选择过滤
+            <select id="selection-filter">
+              <option value="all">全部对象</option>
+              <option value="mesh">仅网格</option>
+              <option value="light" disabled>光源（规划中）</option>
+              <option value="camera" disabled>相机（规划中）</option>
+            </select>
+          </label>
+          <span id="selection-filter-message" class="toolbar-message hidden">仅允许选择网格对象</span>
+        </section>
+        <section id="edit-toolbar" class="panel edit-toolbar">
+          <header>
+            <h2>编辑模式</h2>
+          </header>
+          <div class="edit-toggle">
+            <button id="object-mode-button" type="button" class="active">对象模式 (Tab)</button>
+            <button id="edit-mode-button" type="button">编辑模式 (Tab)</button>
+          </div>
+          <div id="component-switch" class="component-switch hidden" role="radiogroup" aria-label="编辑组件层级">
+            <span class="switch-label">组件层级</span>
+            <button type="button" data-component="vertex" class="component-button" aria-pressed="false">顶点 (1)</button>
+            <button type="button" data-component="edge" class="component-button" aria-pressed="false">边 (2)</button>
+            <button type="button" data-component="face" class="component-button active" aria-pressed="true">面 (3)</button>
+          </div>
+          <div id="proportional-controls" class="proportional-controls hidden">
+            <label class="toggle-control">
+              <input type="checkbox" id="proportional-toggle" /> Proportional Editing (O)
+            </label>
+            <label class="range-control">
+              影响范围
+              <input type="range" id="proportional-radius" min="1" max="50" step="1" value="15" />
+              <output id="proportional-radius-value" for="proportional-radius">15m</output>
+            </label>
+            <p class="panel-hint">滚轮可快速调节影响范围。</p>
+          </div>
+        </section>
+        <section id="property-panel" class="panel property-panel">
+          <header>
+            <h2>对象属性编辑器</h2>
+          </header>
+          <div id="property-empty" class="panel-empty">未选中对象。选择一个对象以编辑其外观与渲染属性。</div>
+          <div id="property-content" class="hidden">
+            <div class="property-heading">
+              <div>
+                <div id="property-name" class="property-name">Cube</div>
+                <div class="property-meta">
+                  <span id="property-type" class="property-tag">Mesh</span>
+                  <span id="property-id" class="property-id"></span>
+                </div>
+              </div>
+              <div class="property-stats">
+                <div>
+                  <span class="stat-label">体积</span>
+                  <span id="property-volume" class="stat-value">—</span>
+                </div>
+                <div>
+                  <span class="stat-label">表面积</span>
+                  <span id="property-area" class="stat-value">—</span>
+                </div>
+              </div>
+            </div>
+            <form id="property-form">
+              <fieldset>
+                <legend>材质</legend>
+                <label>
+                  主色
+                  <input type="color" name="materialColor" id="material-color" />
+                </label>
+                <label class="range-control">
+                  不透明度
+                  <input type="range" name="materialOpacity" id="material-opacity" min="0.1" max="1" step="0.05" />
+                  <output id="material-opacity-value" for="material-opacity">1.0</output>
+                </label>
+              </fieldset>
+              <fieldset>
+                <legend>描边</legend>
+                <label>
+                  描边颜色
+                  <input type="color" name="outlineColor" id="outline-color" />
+                </label>
+                <label class="toggle-control">
+                  <input type="checkbox" name="outlineEnabled" id="outline-enabled" checked /> 启用描边
+                </label>
+                <label class="toggle-control">
+                  <input type="checkbox" name="fillEnabled" id="fill-enabled" checked /> 填充实体
+                </label>
+              </fieldset>
+              <fieldset>
+                <legend>标签</legend>
+                <label>
+                  自定义标签
+                  <input type="text" name="customLabel" id="custom-label" placeholder="例如：地块 A-1" />
+                </label>
+              </fieldset>
+              <section class="modifier-stack" aria-label="修改器堆栈">
+                <header class="modifier-header">
+                  <h3>修改器</h3>
+                  <div class="modifier-add">
+                    <select id="modifier-template">
+                      <option value="subdivision">细分曲面</option>
+                      <option value="bevel">倒角</option>
+                      <option value="solidify">实体化</option>
+                    </select>
+                    <button type="button" id="modifier-add">添加</button>
+                  </div>
+                </header>
+                <ul id="modifier-list" class="modifier-list">
+                  <li class="modifier-empty">暂无修改器。使用上方下拉菜单添加。</li>
+                </ul>
+              </section>
+              <p class="panel-hint">多选模式将在后续版本中提供批量编辑。当前仅支持单对象精确调整。</p>
+            </form>
+          </div>
+        </section>
+        <div id="numeric-overlay" class="hidden"></div>
+        <div id="mode-indicator">模式：View</div>
+        <div id="axis-indicator">轴向：自由</div>
+        <div id="hint-bar">
+          <span>G 移动</span>
+          <span>R 旋转</span>
+          <span>S 缩放</span>
+          <span>N 属性面板</span>
+          <span>Esc 取消</span>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>
