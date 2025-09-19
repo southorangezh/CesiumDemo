@@ -28,6 +28,12 @@ const appState = {
   transformSession: null,
   menuPinned: false,
   menuSequence: [],
+  viewSettings: {
+    xray: false,
+  },
+  selectionFilter: "all",
+  selectionMessageTimeout: null,
+
 };
 
 const stateEvents = new Map();
@@ -71,6 +77,26 @@ const modeIndicator = document.getElementById("mode-indicator");
 const axisIndicator = document.getElementById("axis-indicator");
 const transformPanel = document.getElementById("transform-panel");
 const transformForm = document.getElementById("transform-form");
+const sceneToolbarMessage = document.getElementById("selection-filter-message");
+const propertyPanel = document.getElementById("property-panel");
+const propertyEmpty = document.getElementById("property-empty");
+const propertyContent = document.getElementById("property-content");
+const propertyName = document.getElementById("property-name");
+const propertyType = document.getElementById("property-type");
+const propertyId = document.getElementById("property-id");
+const propertyVolume = document.getElementById("property-volume");
+const propertyArea = document.getElementById("property-area");
+const propertyForm = document.getElementById("property-form");
+const materialColorInput = document.getElementById("material-color");
+const materialOpacityInput = document.getElementById("material-opacity");
+const materialOpacityValue = document.getElementById("material-opacity-value");
+const outlineColorInput = document.getElementById("outline-color");
+const outlineEnabledInput = document.getElementById("outline-enabled");
+const fillEnabledInput = document.getElementById("fill-enabled");
+const customLabelInput = document.getElementById("custom-label");
+const xrayToggle = document.getElementById("xray-toggle");
+const selectionFilter = document.getElementById("selection-filter");
+
 
 const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
 let gizmoEntities = [];
@@ -85,6 +111,15 @@ const defaultCubeConfig = {
   color: Cesium.Color.fromCssColorString("#4f46e5").withAlpha(0.8),
   outlineColor: Cesium.Color.fromCssColorString("#ffb454"),
 };
+
+if (xrayToggle) {
+  xrayToggle.checked = appState.viewSettings.xray;
+}
+if (selectionFilter) {
+  selectionFilter.value = appState.selectionFilter;
+}
+updateSelectionFilterMessage();
+
 
 function updateModeIndicator() {
   const labels = {
@@ -159,6 +194,174 @@ function getAxisVector(axis, space, entity) {
   return Cesium.Cartesian3.normalize(vector, vector);
 }
 
+function colorToHex(color) {
+  if (!color) return "#ffffff";
+  const r = Cesium.Math.clamp(Math.round(color.red * 255), 0, 255);
+  const g = Cesium.Math.clamp(Math.round(color.green * 255), 0, 255);
+  const b = Cesium.Math.clamp(Math.round(color.blue * 255), 0, 255);
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+
+function formatNumber(value, fractionDigits = 2) {
+  return Number.parseFloat(value).toFixed(fractionDigits);
+}
+
+function computeBoxVolume(dimensions) {
+  return dimensions.x * dimensions.y * dimensions.z;
+}
+
+function computeBoxArea(dimensions) {
+  const xy = dimensions.x * dimensions.y;
+  const yz = dimensions.y * dimensions.z;
+  const xz = dimensions.x * dimensions.z;
+  return 2 * (xy + yz + xz);
+}
+
+function updateSelectionFilterMessage() {
+  if (!sceneToolbarMessage) return;
+  if (appState.selectionMessageTimeout) {
+    window.clearTimeout(appState.selectionMessageTimeout);
+    appState.selectionMessageTimeout = null;
+  }
+  if (appState.selectionFilter === "all") {
+    sceneToolbarMessage.classList.add("hidden");
+  } else if (appState.selectionFilter === "mesh") {
+    sceneToolbarMessage.textContent = "仅允许选择网格对象";
+    sceneToolbarMessage.classList.remove("hidden");
+  } else {
+    sceneToolbarMessage.textContent = "当前过滤器不允许选择此类型";
+    sceneToolbarMessage.classList.remove("hidden");
+  }
+}
+
+function showSelectionFilteredHint() {
+  if (!sceneToolbarMessage || appState.selectionFilter === "all") return;
+  if (appState.selectionMessageTimeout) {
+    window.clearTimeout(appState.selectionMessageTimeout);
+  }
+  const text = appState.selectionFilter === "mesh" ? "过滤器：仅网格可选" : "过滤器阻止选择当前对象";
+  sceneToolbarMessage.textContent = text;
+  sceneToolbarMessage.classList.remove("hidden");
+  appState.selectionMessageTimeout = window.setTimeout(() => {
+    updateSelectionFilterMessage();
+  }, 2000);
+}
+
+function applyMaterial(entity, options = {}) {
+  if (!entity || !entity.cubeMetadata) return;
+  if (appState.transformSession && appState.transformSession.entity === entity && options.force !== true) {
+    return;
+  }
+
+  const metadata = entity.cubeMetadata;
+  const baseColor = metadata.color || defaultCubeConfig.color;
+  const outlineColor = metadata.outlineColor || defaultCubeConfig.outlineColor;
+  const fillEnabled = metadata.fillEnabled !== false;
+  const outlineEnabled = metadata.outlineEnabled !== false;
+  const baseOpacity = Cesium.Math.clamp(metadata.opacity ?? baseColor.alpha ?? 0.8, 0.05, 1.0);
+
+  let finalAlpha = baseOpacity;
+  if (appState.viewSettings.xray) {
+    finalAlpha = Math.min(finalAlpha, 0.35);
+  }
+  if (options.selected) {
+    const highlightFloor = appState.viewSettings.xray ? 0.55 : 0.7;
+    finalAlpha = Math.max(finalAlpha, highlightFloor);
+    finalAlpha = Math.min(finalAlpha, 1.0);
+  }
+
+  entity.box.fill = fillEnabled;
+  entity.box.material = new Cesium.ColorMaterialProperty(baseColor.withAlpha(finalAlpha));
+  entity.box.outline = outlineEnabled || options.selected;
+  const displayOutlineColor = options.selected ? Cesium.Color.ORANGE : outlineColor;
+  entity.box.outlineColor = displayOutlineColor.withAlpha(appState.viewSettings.xray ? 0.6 : 1.0);
+}
+
+function refreshAllMaterials() {
+  appState.objects.forEach((entity) => {
+    const isSelected = entity === appState.selectedObject && !appState.transformSession;
+    applyMaterial(entity, { selected: isSelected, force: true });
+  });
+}
+
+function updatePropertyPanel(entity) {
+  if (!propertyPanel) return;
+  if (!entity) {
+    propertyContent.classList.add("hidden");
+    propertyEmpty.classList.remove("hidden");
+    propertyName.textContent = "";
+    propertyId.textContent = "";
+    return;
+  }
+
+  propertyContent.classList.remove("hidden");
+  propertyEmpty.classList.add("hidden");
+
+  const metadata = entity.cubeMetadata || {};
+  const julianNow = Cesium.JulianDate.now();
+  const dims = entity.box.dimensions.getValue(julianNow);
+
+  propertyName.textContent = metadata.label || entity.name || entity.id || "对象";
+  const typeLabel = metadata.type ? metadata.type.charAt(0).toUpperCase() + metadata.type.slice(1) : "Object";
+  propertyType.textContent = typeLabel;
+  propertyId.textContent = `#${entity.id || "-"}`;
+  propertyVolume.textContent = `${formatNumber(computeBoxVolume(dims))} m³`;
+  propertyArea.textContent = `${formatNumber(computeBoxArea(dims))} m²`;
+
+  const baseColor = metadata.color || defaultCubeConfig.color;
+  materialColorInput.value = colorToHex(baseColor);
+  const opacityValue = Cesium.Math.clamp(metadata.opacity ?? baseColor.alpha ?? 0.8, 0.05, 1.0);
+  materialOpacityInput.value = opacityValue;
+  materialOpacityValue.textContent = opacityValue.toFixed(2);
+  outlineColorInput.value = colorToHex(metadata.outlineColor || defaultCubeConfig.outlineColor);
+  outlineEnabledInput.checked = metadata.outlineEnabled !== false;
+  fillEnabledInput.checked = metadata.fillEnabled !== false;
+  customLabelInput.value = metadata.label || "";
+}
+
+function isSelectionAllowed(entity) {
+  if (appState.selectionFilter === "all") return true;
+  const type = entity?.cubeMetadata?.type || "object";
+  return type === appState.selectionFilter;
+}
+
+function handlePropertyFormInput(event) {
+  if (!appState.selectedObject) return;
+  const entity = appState.selectedObject;
+  const metadata = entity.cubeMetadata;
+  if (!metadata) return;
+
+  const target = event.target;
+  switch (target.name) {
+    case "materialColor":
+      metadata.color = Cesium.Color.fromCssColorString(target.value).withAlpha(1.0);
+      break;
+    case "materialOpacity":
+      metadata.opacity = Cesium.Math.clamp(parseFloat(target.value), 0.05, 1.0);
+      materialOpacityValue.textContent = metadata.opacity.toFixed(2);
+      break;
+    case "outlineColor":
+      metadata.outlineColor = Cesium.Color.fromCssColorString(target.value).withAlpha(1.0);
+      break;
+    case "outlineEnabled":
+      metadata.outlineEnabled = target.checked;
+      break;
+    case "fillEnabled":
+      metadata.fillEnabled = target.checked;
+      break;
+    case "customLabel":
+      metadata.label = target.value.trim();
+      entity.name = metadata.label || entity.id;
+      propertyName.textContent = metadata.label || entity.name || entity.id;
+      break;
+    default:
+      return;
+  }
+
+  applyMaterial(entity, { selected: true, force: true });
+}
+
+
 function createCube(position, options = {}) {
   const id = ++objectCounter;
   const name = `Cube_${id}`;
@@ -182,9 +385,17 @@ function createCube(position, options = {}) {
   cubeEntity.cubeMetadata = {
     dimensions: Cesium.Cartesian3.clone(dimensions),
     color,
+    outlineColor,
+    opacity: options.opacity ?? color.alpha ?? 0.8,
+    outlineEnabled: true,
+    fillEnabled: true,
+    type: "mesh",
+    label: options.label || "",
   };
 
   appState.objects.set(name, cubeEntity);
+  applyMaterial(cubeEntity, { selected: true, force: true });
+
   focusOnEntity(cubeEntity);
   setSelectedObject(cubeEntity);
   openParameterPanel();
@@ -256,23 +467,19 @@ function setSelectedObject(entity) {
   } else {
     hidePanels();
     removeGizmo();
+    updatePropertyPanel(null);
+
     emitStateEvent("selection", { entity: null, selected: false });
   }
 }
 
 function highlightEntity(entity) {
-  const color = entity.box.material.getValue(Cesium.JulianDate.now());
-  entity.box.material = new Cesium.ColorMaterialProperty(color.withAlpha(0.6));
-  entity.box.outline = true;
-  entity.box.outlineColor = Cesium.Color.ORANGE;
+  applyMaterial(entity, { selected: true, force: true });
 }
 
 function restoreDefaultMaterial(entity) {
-  const metadata = entity.cubeMetadata;
-  if (!metadata) return;
-  entity.box.material = new Cesium.ColorMaterialProperty(metadata.color);
-  entity.box.outline = true;
-  entity.box.outlineColor = defaultCubeConfig.outlineColor;
+  applyMaterial(entity, { selected: false, force: true });
+
 }
 
 function openParameterPanel() {
@@ -313,6 +520,8 @@ function updatePanels(entity) {
   transformForm.transformScaleX.value = (dimensions.x / defaultCubeConfig.dimensions.x).toFixed(2);
   transformForm.transformScaleY.value = (dimensions.y / defaultCubeConfig.dimensions.y).toFixed(2);
   transformForm.transformScaleZ.value = (dimensions.z / defaultCubeConfig.dimensions.z).toFixed(2);
+  updatePropertyPanel(entity);
+
 }
 
 function removeGizmo() {
@@ -559,6 +768,28 @@ parameterForm.addEventListener("submit", (event) => {
   updateGizmoPosition();
 });
 
+if (propertyForm) {
+  propertyForm.addEventListener("input", handlePropertyFormInput);
+}
+
+if (xrayToggle) {
+  xrayToggle.addEventListener("change", (event) => {
+    appState.viewSettings.xray = event.target.checked;
+    refreshAllMaterials();
+  });
+}
+
+if (selectionFilter) {
+  selectionFilter.addEventListener("change", (event) => {
+    appState.selectionFilter = event.target.value;
+    updateSelectionFilterMessage();
+    if (appState.selectedObject && !isSelectionAllowed(appState.selectedObject)) {
+      setSelectedObject(null);
+    }
+  });
+}
+
+
 transformForm.addEventListener("submit", (event) => {
   event.preventDefault();
   if (!appState.selectedObject) return;
@@ -610,7 +841,12 @@ function handleSelection(click) {
 
   const picked = viewer.scene.pick(click.position);
   if (Cesium.defined(picked) && picked.id && picked.id.box) {
-    setSelectedObject(picked.id);
+    if (isSelectionAllowed(picked.id)) {
+      setSelectedObject(picked.id);
+    } else {
+      showSelectionFilteredHint();
+    }
+
   } else {
     setSelectedObject(null);
   }

@@ -70,6 +70,84 @@
             <button type="submit">更新</button>
           </form>
         </section>
+        <section id="scene-toolbar" aria-label="视图与选择控制">
+          <label class="toolbar-item">
+            <input type="checkbox" id="xray-toggle" /> X-Ray 透视
+          </label>
+          <label class="toolbar-item">
+            选择过滤
+            <select id="selection-filter">
+              <option value="all">全部对象</option>
+              <option value="mesh">仅网格</option>
+              <option value="light" disabled>光源（规划中）</option>
+              <option value="camera" disabled>相机（规划中）</option>
+            </select>
+          </label>
+          <span id="selection-filter-message" class="toolbar-message hidden">仅允许选择网格对象</span>
+        </section>
+        <section id="property-panel" class="panel property-panel">
+          <header>
+            <h2>对象属性编辑器</h2>
+          </header>
+          <div id="property-empty" class="panel-empty">未选中对象。选择一个对象以编辑其外观与渲染属性。</div>
+          <div id="property-content" class="hidden">
+            <div class="property-heading">
+              <div>
+                <div id="property-name" class="property-name">Cube</div>
+                <div class="property-meta">
+                  <span id="property-type" class="property-tag">Mesh</span>
+                  <span id="property-id" class="property-id"></span>
+                </div>
+              </div>
+              <div class="property-stats">
+                <div>
+                  <span class="stat-label">体积</span>
+                  <span id="property-volume" class="stat-value">—</span>
+                </div>
+                <div>
+                  <span class="stat-label">表面积</span>
+                  <span id="property-area" class="stat-value">—</span>
+                </div>
+              </div>
+            </div>
+            <form id="property-form">
+              <fieldset>
+                <legend>材质</legend>
+                <label>
+                  主色
+                  <input type="color" name="materialColor" id="material-color" />
+                </label>
+                <label class="range-control">
+                  不透明度
+                  <input type="range" name="materialOpacity" id="material-opacity" min="0.1" max="1" step="0.05" />
+                  <output id="material-opacity-value" for="material-opacity">1.0</output>
+                </label>
+              </fieldset>
+              <fieldset>
+                <legend>描边</legend>
+                <label>
+                  描边颜色
+                  <input type="color" name="outlineColor" id="outline-color" />
+                </label>
+                <label class="toggle-control">
+                  <input type="checkbox" name="outlineEnabled" id="outline-enabled" checked /> 启用描边
+                </label>
+                <label class="toggle-control">
+                  <input type="checkbox" name="fillEnabled" id="fill-enabled" checked /> 填充实体
+                </label>
+              </fieldset>
+              <fieldset>
+                <legend>标签</legend>
+                <label>
+                  自定义标签
+                  <input type="text" name="customLabel" id="custom-label" placeholder="例如：地块 A-1" />
+                </label>
+              </fieldset>
+              <p class="panel-hint">多选模式将在后续版本中提供批量编辑。当前仅支持单对象精确调整。</p>
+            </form>
+          </div>
+        </section>
+
         <div id="numeric-overlay" class="hidden"></div>
         <div id="mode-indicator">模式：View</div>
         <div id="axis-indicator">轴向：自由</div>
