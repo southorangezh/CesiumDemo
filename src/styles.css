@@ -13,11 +13,17 @@
   box-sizing: border-box;
 }
 
+html{
+  height: 100%;
+}
+
 body {
   margin: 0;
   font-family: "Inter", "PingFang SC", "Microsoft YaHei", sans-serif;
   background: #0b1120;
   color: var(--text-light);
+  min-height: 100vh;
+  overflow: hidden;
   height: 100vh;
 }
 
