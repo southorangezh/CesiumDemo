@@ -17,6 +17,18 @@ viewer.scene.globe.depthTestAgainstTerrain = true;
 viewer.scene.globe.enableLighting = true;
 viewer.scene.skyAtmosphere.brightnessShift = 0.15;
 
+const PLANE_AXIS_MAP = {
+  x: "yz",
+  y: "xz",
+  z: "xy",
+};
+
+const PLANE_NORMAL_AXIS = {
+  xy: "z",
+  yz: "x",
+  xz: "y",
+};
+
 const appState = {
   mode: "view",
   selectedObject: null,
@@ -33,6 +45,14 @@ const appState = {
   },
   selectionFilter: "all",
   selectionMessageTimeout: null,
+  objectMode: "object",
+  componentMode: "face",
+  selectedComponent: null,
+  proportionalEditing: false,
+  proportionalRadius: 15,
+  proportionalIndicator: null,
+  cameraNavigationActive: false,
+  modifierCounter: 0,
 
 };
 
@@ -96,6 +116,19 @@ const fillEnabledInput = document.getElementById("fill-enabled");
 const customLabelInput = document.getElementById("custom-label");
 const xrayToggle = document.getElementById("xray-toggle");
 const selectionFilter = document.getElementById("selection-filter");
+const objectModeButton = document.getElementById("object-mode-button");
+const editModeButton = document.getElementById("edit-mode-button");
+const componentSwitch = document.getElementById("component-switch");
+const componentButtons = componentSwitch
+  ? Array.from(componentSwitch.querySelectorAll(".component-button"))
+  : [];
+const proportionalToggle = document.getElementById("proportional-toggle");
+const proportionalRadiusInput = document.getElementById("proportional-radius");
+const proportionalRadiusValue = document.getElementById("proportional-radius-value");
+const proportionalControls = document.getElementById("proportional-controls");
+const modifierTemplate = document.getElementById("modifier-template");
+const modifierAddButton = document.getElementById("modifier-add");
+const modifierList = document.getElementById("modifier-list");
 
 
 const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
@@ -112,6 +145,60 @@ const defaultCubeConfig = {
   outlineColor: Cesium.Color.fromCssColorString("#ffb454"),
 };
 
+const VERTEX_SIGNS = [
+  { x: 1, y: 1, z: 1 },
+  { x: 1, y: 1, z: -1 },
+  { x: 1, y: -1, z: 1 },
+  { x: 1, y: -1, z: -1 },
+  { x: -1, y: 1, z: 1 },
+  { x: -1, y: 1, z: -1 },
+  { x: -1, y: -1, z: 1 },
+  { x: -1, y: -1, z: -1 },
+];
+
+const EDGE_DEFS = [
+  { vertices: [0, 1] },
+  { vertices: [0, 2] },
+  { vertices: [0, 4] },
+  { vertices: [3, 1] },
+  { vertices: [3, 2] },
+  { vertices: [3, 7] },
+  { vertices: [5, 1] },
+  { vertices: [5, 4] },
+  { vertices: [5, 7] },
+  { vertices: [6, 2] },
+  { vertices: [6, 4] },
+  { vertices: [6, 7] },
+];
+
+const FACE_DEFS = [
+  { vertices: [0, 2, 3, 1], signs: { x: 1, y: 0, z: 0 } },
+  { vertices: [4, 5, 7, 6], signs: { x: -1, y: 0, z: 0 } },
+  { vertices: [0, 1, 5, 4], signs: { x: 0, y: 1, z: 0 } },
+  { vertices: [2, 6, 7, 3], signs: { x: 0, y: -1, z: 0 } },
+  { vertices: [0, 4, 6, 2], signs: { x: 0, y: 0, z: 1 } },
+  { vertices: [1, 3, 7, 5], signs: { x: 0, y: 0, z: -1 } },
+];
+
+const MODIFIER_LIBRARY = {
+  subdivision: {
+    label: "细分曲面",
+    params: { level: 1 },
+    range: { key: "level", min: 1, max: 5, step: 1 },
+  },
+  bevel: {
+    label: "倒角",
+    params: { amount: 0.35 },
+    range: { key: "amount", min: 0, max: 1, step: 0.05 },
+  },
+  solidify: {
+    label: "实体化",
+    params: { thickness: 0.5 },
+    range: { key: "thickness", min: 0, max: 2, step: 0.1 },
+  },
+};
+
+
 if (xrayToggle) {
   xrayToggle.checked = appState.viewSettings.xray;
 }
@@ -119,6 +206,64 @@ if (selectionFilter) {
   selectionFilter.value = appState.selectionFilter;
 }
 updateSelectionFilterMessage();
+
+function getEntityPosition(entity, julian = Cesium.JulianDate.now(), result) {
+  if (!entity) {
+    return result ? Cesium.Cartesian3.clone(Cesium.Cartesian3.ZERO, result) : new Cesium.Cartesian3();
+  }
+  const { position } = entity;
+  if (position && typeof position.getValue === "function") {
+    return position.getValue(julian, result || new Cesium.Cartesian3());
+  }
+  if (position) {
+    return Cesium.Cartesian3.clone(position, result || new Cesium.Cartesian3());
+  }
+  return result ? Cesium.Cartesian3.clone(Cesium.Cartesian3.ZERO, result) : new Cesium.Cartesian3();
+}
+
+function getEntityOrientation(entity, julian = Cesium.JulianDate.now()) {
+  if (!entity || !Cesium.defined(entity.orientation)) {
+    return Cesium.Quaternion.IDENTITY;
+  }
+  const { orientation } = entity;
+  if (orientation && typeof orientation.getValue === "function") {
+    return orientation.getValue(julian, new Cesium.Quaternion()) || Cesium.Quaternion.IDENTITY;
+  }
+  if (orientation instanceof Cesium.Quaternion) {
+    return orientation;
+  }
+  if (
+    orientation &&
+    typeof orientation.x === "number" &&
+    typeof orientation.y === "number" &&
+    typeof orientation.z === "number" &&
+    typeof orientation.w === "number"
+  ) {
+    return new Cesium.Quaternion(orientation.x, orientation.y, orientation.z, orientation.w);
+  }
+  return Cesium.Quaternion.IDENTITY;
+}
+
+function isPlaneConstraint(axis) {
+  return axis === "xy" || axis === "yz" || axis === "xz";
+}
+
+function getPlaneAxes(axis) {
+  if (!isPlaneConstraint(axis)) return [];
+  return axis.split("");
+}
+
+function getPlaneNormalAxis(axis) {
+  return PLANE_NORMAL_AXIS[axis] || "z";
+}
+
+function computeProportionalWeight(distance, radius) {
+  if (!Cesium.defined(radius) || radius <= Cesium.Math.EPSILON7) {
+    return 0;
+  }
+  const t = Cesium.Math.clamp(1 - distance / radius, 0, 1);
+  return t * t * (3 - 2 * t);
+}
 
 
 function updateModeIndicator() {
@@ -130,7 +275,9 @@ function updateModeIndicator() {
     create: "创建",
   };
   const label = labels[appState.mode] || appState.mode;
-  modeIndicator.textContent = `模式：${label}`;
+  const scope = appState.objectMode === "edit" ? "编辑" : "对象";
+  modeIndicator.textContent = `模式：${scope} · ${label}`;
+
 }
 
 function updateAxisIndicator() {
@@ -138,7 +285,11 @@ function updateAxisIndicator() {
     axisIndicator.textContent = "轴向：自由";
   } else {
     const space = appState.axisSpace === "local" ? "本地" : "全局";
-    axisIndicator.textContent = `轴向：${appState.axisMode.toUpperCase()} (${space})`;
+    const label = isPlaneConstraint(appState.axisMode)
+      ? `${appState.axisMode.toUpperCase()} 平面`
+      : appState.axisMode.toUpperCase();
+    axisIndicator.textContent = `轴向：${label} (${space})`;
+
   }
   emitStateEvent("axis", { axis: appState.axisMode, space: appState.axisSpace });
 }
@@ -184,15 +335,66 @@ function getAxisVector(axis, space, entity) {
     return unit;
   }
 
-  if (space === "local" && Cesium.defined(entity.orientation)) {
-    const orientationMatrix = Cesium.Matrix3.fromQuaternion(entity.orientation);
-    return Cesium.Matrix3.multiplyByVector(orientationMatrix, unit, new Cesium.Cartesian3());
+  if (space === "local") {
+    const orientationMatrix = Cesium.Matrix3.fromQuaternion(getEntityOrientation(entity), new Cesium.Matrix3());
+    const rotated = Cesium.Matrix3.multiplyByVector(orientationMatrix, unit, new Cesium.Cartesian3());
+    return Cesium.Cartesian3.normalize(rotated, rotated);
   }
 
-  const enu = getEastNorthUpMatrix(entity.position.getValue(Cesium.JulianDate.now()));
+  const enu = getEastNorthUpMatrix(getEntityPosition(entity));
+
   const vector = Cesium.Matrix4.getColumn(enu, axis === "x" ? 0 : axis === "y" ? 1 : 2, new Cesium.Cartesian3());
   return Cesium.Cartesian3.normalize(vector, vector);
 }
+
+function getEntityAxes(entity) {
+  const julian = Cesium.JulianDate.now();
+  const orientation = getEntityOrientation(entity, julian);
+  const matrix = Cesium.Matrix3.fromQuaternion(orientation, new Cesium.Matrix3());
+  const xAxis = Cesium.Matrix3.getColumn(matrix, 0, new Cesium.Cartesian3());
+  const yAxis = Cesium.Matrix3.getColumn(matrix, 1, new Cesium.Cartesian3());
+  const zAxis = Cesium.Matrix3.getColumn(matrix, 2, new Cesium.Cartesian3());
+  return {
+    x: Cesium.Cartesian3.normalize(xAxis, xAxis),
+    y: Cesium.Cartesian3.normalize(yAxis, yAxis),
+    z: Cesium.Cartesian3.normalize(zAxis, zAxis),
+  };
+}
+
+function computeWorldDirectionFromSigns(signs, entity) {
+  const axes = getEntityAxes(entity);
+  const direction = new Cesium.Cartesian3();
+  if (signs.x) {
+    Cesium.Cartesian3.add(
+      direction,
+      Cesium.Cartesian3.multiplyByScalar(axes.x, signs.x, new Cesium.Cartesian3()),
+      direction
+    );
+  }
+  if (signs.y) {
+    Cesium.Cartesian3.add(
+      direction,
+      Cesium.Cartesian3.multiplyByScalar(axes.y, signs.y, new Cesium.Cartesian3()),
+      direction
+    );
+  }
+  if (signs.z) {
+    Cesium.Cartesian3.add(
+      direction,
+      Cesium.Cartesian3.multiplyByScalar(axes.z, signs.z, new Cesium.Cartesian3()),
+      direction
+    );
+  }
+  if (Cesium.Cartesian3.magnitude(direction) < Cesium.Math.EPSILON6) {
+    return axes.x;
+  }
+  return Cesium.Cartesian3.normalize(direction, direction);
+}
+
+function computeSignsMagnitude(signs) {
+  return Math.sqrt((signs.x || 0) ** 2 + (signs.y || 0) ** 2 + (signs.z || 0) ** 2) || 1;
+}
+
 
 function colorToHex(color) {
   if (!color) return "#ffffff";
@@ -200,6 +402,28 @@ function colorToHex(color) {
   const g = Cesium.Math.clamp(Math.round(color.green * 255), 0, 255);
   const b = Cesium.Math.clamp(Math.round(color.blue * 255), 0, 255);
   return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+
+function cloneColor(color) {
+  if (!color) return Cesium.Color.WHITE.clone();
+  return color.clone(new Cesium.Color());
+}
+
+function brightenColor(color, amount) {
+  const base = cloneColor(color);
+  base.red = Cesium.Math.clamp(base.red + amount, 0, 1);
+  base.green = Cesium.Math.clamp(base.green + amount, 0, 1);
+  base.blue = Cesium.Math.clamp(base.blue + amount, 0, 1);
+  return base;
+}
+
+function tintColor(color, target, factor) {
+  const base = cloneColor(color);
+  const targetColor = target ? cloneColor(target) : Cesium.Color.WHITE;
+  base.red = Cesium.Math.clamp(base.red + (targetColor.red - base.red) * factor, 0, 1);
+  base.green = Cesium.Math.clamp(base.green + (targetColor.green - base.green) * factor, 0, 1);
+  base.blue = Cesium.Math.clamp(base.blue + (targetColor.blue - base.blue) * factor, 0, 1);
+  return base;
 }
 
 function formatNumber(value, fractionDigits = 2) {
@@ -254,11 +478,13 @@ function applyMaterial(entity, options = {}) {
   }
 
   const metadata = entity.cubeMetadata;
-  const baseColor = metadata.color || defaultCubeConfig.color;
-  const outlineColor = metadata.outlineColor || defaultCubeConfig.outlineColor;
+  const baseColor = metadata.runtimeColor || metadata.color || defaultCubeConfig.color;
+  const outlineColor = metadata.runtimeOutline || metadata.outlineColor || defaultCubeConfig.outlineColor;
   const fillEnabled = metadata.fillEnabled !== false;
   const outlineEnabled = metadata.outlineEnabled !== false;
-  const baseOpacity = Cesium.Math.clamp(metadata.opacity ?? baseColor.alpha ?? 0.8, 0.05, 1.0);
+  const baseOpacityValue = metadata.runtimeOpacity ?? metadata.opacity ?? baseColor.alpha ?? 0.8;
+  const baseOpacity = Cesium.Math.clamp(baseOpacityValue, 0.05, 1.0);
+
 
   let finalAlpha = baseOpacity;
   if (appState.viewSettings.xray) {
@@ -280,9 +506,57 @@ function applyMaterial(entity, options = {}) {
 function refreshAllMaterials() {
   appState.objects.forEach((entity) => {
     const isSelected = entity === appState.selectedObject && !appState.transformSession;
+    applyModifiers(entity);
+
     applyMaterial(entity, { selected: isSelected, force: true });
   });
 }
+
+function applyModifiers(entity) {
+  if (!entity || !entity.cubeMetadata) return;
+  const metadata = entity.cubeMetadata;
+  const modifiers = metadata.modifiers || [];
+  if (modifiers.length === 0) {
+    metadata.runtimeColor = null;
+    metadata.runtimeOutline = null;
+    metadata.runtimeOpacity = null;
+    return;
+  }
+
+  let workingColor = cloneColor(metadata.color || defaultCubeConfig.color);
+  let workingOutline = cloneColor(metadata.outlineColor || defaultCubeConfig.outlineColor);
+  let workingOpacity = metadata.opacity ?? workingColor.alpha ?? 0.8;
+
+  modifiers.forEach((modifier) => {
+    if (!modifier || modifier.enabled === false) return;
+    switch (modifier.type) {
+      case "subdivision": {
+        const level = Cesium.Math.clamp(modifier.params?.level ?? 1, 1, 5);
+        const amount = level * 0.05;
+        workingColor = brightenColor(workingColor, amount);
+        break;
+      }
+      case "bevel": {
+        const amount = Cesium.Math.clamp(modifier.params?.amount ?? 0.35, 0, 1);
+        const target = Cesium.Color.fromCssColorString("#fbbf24");
+        workingOutline = tintColor(workingOutline, target, amount * 0.4);
+        break;
+      }
+      case "solidify": {
+        const thickness = Cesium.Math.clamp(modifier.params?.thickness ?? 0.5, 0, 2);
+        workingOpacity = Cesium.Math.clamp(workingOpacity + thickness * 0.05, 0.05, 1.0);
+        break;
+      }
+      default:
+        break;
+    }
+  });
+
+  metadata.runtimeColor = workingColor;
+  metadata.runtimeOutline = workingOutline;
+  metadata.runtimeOpacity = workingOpacity;
+}
+
 
 function updatePropertyPanel(entity) {
   if (!propertyPanel) return;
@@ -291,6 +565,8 @@ function updatePropertyPanel(entity) {
     propertyEmpty.classList.remove("hidden");
     propertyName.textContent = "";
     propertyId.textContent = "";
+    renderModifierList(null);
+
     return;
   }
 
@@ -317,6 +593,8 @@ function updatePropertyPanel(entity) {
   outlineEnabledInput.checked = metadata.outlineEnabled !== false;
   fillEnabledInput.checked = metadata.fillEnabled !== false;
   customLabelInput.value = metadata.label || "";
+  renderModifierList(entity);
+
 }
 
 function isSelectionAllowed(entity) {
@@ -324,6 +602,123 @@ function isSelectionAllowed(entity) {
   const type = entity?.cubeMetadata?.type || "object";
   return type === appState.selectionFilter;
 }
+
+function renderModifierList(entity) {
+  if (!modifierList) return;
+  modifierList.innerHTML = "";
+
+  if (!entity || !entity.cubeMetadata) {
+    const empty = document.createElement("li");
+    empty.className = "modifier-empty";
+    empty.textContent = "选择对象以管理修改器。";
+    modifierList.appendChild(empty);
+    return;
+  }
+
+  const metadata = entity.cubeMetadata;
+  const modifiers = metadata.modifiers || [];
+  if (modifiers.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "modifier-empty";
+    empty.textContent = "暂无修改器。使用上方下拉菜单添加。";
+    modifierList.appendChild(empty);
+    return;
+  }
+
+  modifiers.forEach((modifier, index) => {
+    const config = MODIFIER_LIBRARY[modifier.type];
+    const item = document.createElement("li");
+    item.className = "modifier-item";
+    if (modifier.enabled === false) {
+      item.classList.add("disabled");
+    }
+
+    const title = document.createElement("div");
+    title.className = "modifier-title";
+    title.textContent = config?.label || modifier.type;
+
+    const params = document.createElement("div");
+    params.className = "modifier-params";
+    if (config?.range) {
+      const rangeWrapper = document.createElement("label");
+      rangeWrapper.textContent = "强度";
+      const range = document.createElement("input");
+      range.type = "range";
+      range.min = String(config.range.min);
+      range.max = String(config.range.max);
+      range.step = String(config.range.step ?? 0.1);
+      const key = config.range.key;
+      const current = modifier.params?.[key] ?? config.range.min;
+      range.value = String(current);
+      const output = document.createElement("span");
+      output.textContent = Number(current).toFixed(2);
+      range.addEventListener("input", (event) => {
+        const value = Number(event.target.value);
+        modifier.params = { ...modifier.params, [key]: value };
+        output.textContent = Number(value).toFixed(2);
+        applyModifiers(entity);
+        applyMaterial(entity, { selected: entity === appState.selectedObject, force: true });
+      });
+      rangeWrapper.appendChild(range);
+      rangeWrapper.appendChild(output);
+      params.appendChild(rangeWrapper);
+    }
+
+    const controls = document.createElement("div");
+    controls.className = "modifier-controls";
+
+    const toggle = document.createElement("button");
+    toggle.textContent = modifier.enabled === false ? "启用" : "禁用";
+    toggle.addEventListener("click", () => {
+      modifier.enabled = modifier.enabled === false;
+      renderModifierList(entity);
+      applyModifiers(entity);
+      applyMaterial(entity, { selected: entity === appState.selectedObject, force: true });
+    });
+
+    const up = document.createElement("button");
+    up.textContent = "上移";
+    up.disabled = index === 0;
+    up.addEventListener("click", () => {
+      if (index === 0) return;
+      [modifiers[index - 1], modifiers[index]] = [modifiers[index], modifiers[index - 1]];
+      renderModifierList(entity);
+      applyModifiers(entity);
+      applyMaterial(entity, { selected: entity === appState.selectedObject, force: true });
+    });
+
+    const down = document.createElement("button");
+    down.textContent = "下移";
+    down.disabled = index === modifiers.length - 1;
+    down.addEventListener("click", () => {
+      if (index === modifiers.length - 1) return;
+      [modifiers[index + 1], modifiers[index]] = [modifiers[index], modifiers[index + 1]];
+      renderModifierList(entity);
+      applyModifiers(entity);
+      applyMaterial(entity, { selected: entity === appState.selectedObject, force: true });
+    });
+
+    const remove = document.createElement("button");
+    remove.textContent = "移除";
+    remove.addEventListener("click", () => {
+      modifiers.splice(index, 1);
+      renderModifierList(entity);
+      applyModifiers(entity);
+      applyMaterial(entity, { selected: entity === appState.selectedObject, force: true });
+    });
+
+    controls.appendChild(toggle);
+    controls.appendChild(up);
+    controls.appendChild(down);
+    controls.appendChild(remove);
+
+    item.appendChild(title);
+    item.appendChild(params);
+    item.appendChild(controls);
+    modifierList.appendChild(item);
+  });
+}
+
 
 function handlePropertyFormInput(event) {
   if (!appState.selectedObject) return;
@@ -358,6 +753,7 @@ function handlePropertyFormInput(event) {
       return;
   }
 
+  applyModifiers(entity);
   applyMaterial(entity, { selected: true, force: true });
 }
 
@@ -391,15 +787,75 @@ function createCube(position, options = {}) {
     fillEnabled: true,
     type: "mesh",
     label: options.label || "",
+    modifiers: [],
   };
 
   appState.objects.set(name, cubeEntity);
+  applyModifiers(cubeEntity);
   applyMaterial(cubeEntity, { selected: true, force: true });
 
   focusOnEntity(cubeEntity);
   setSelectedObject(cubeEntity);
   openParameterPanel();
   return cubeEntity;
+}
+
+function computeCubeGeometry(entity) {
+  const julian = Cesium.JulianDate.now();
+  const dims = entity.box.dimensions.getValue(julian);
+  const half = new Cesium.Cartesian3(dims.x / 2, dims.y / 2, dims.z / 2);
+  const position = getEntityPosition(entity, julian, new Cesium.Cartesian3());
+  const orientation = getEntityOrientation(entity, julian);
+  const matrix = Cesium.Matrix3.fromQuaternion(orientation, new Cesium.Matrix3());
+
+  const vertices = VERTEX_SIGNS.map((signs, index) => {
+    const local = new Cesium.Cartesian3(half.x * signs.x, half.y * signs.y, half.z * signs.z);
+    const rotated = Cesium.Matrix3.multiplyByVector(matrix, local, new Cesium.Cartesian3());
+    const world = Cesium.Cartesian3.add(position, rotated, new Cesium.Cartesian3());
+    return {
+      index,
+      position: world,
+      signs,
+    };
+  });
+
+  const faces = FACE_DEFS.map((def, index) => {
+    const faceVertices = def.vertices.map((vertexIndex) => vertices[vertexIndex].position);
+    const center = faceVertices.reduce(
+      (acc, current) => Cesium.Cartesian3.add(acc, current, acc),
+      new Cesium.Cartesian3()
+    );
+    Cesium.Cartesian3.divideByScalar(center, faceVertices.length, center);
+    return {
+      index,
+      vertices: faceVertices,
+      center,
+      signs: def.signs,
+      normal: computeWorldDirectionFromSigns(def.signs, entity),
+    };
+  });
+
+  const edges = EDGE_DEFS.map((def, index) => {
+    const [startIndex, endIndex] = def.vertices;
+    const start = vertices[startIndex];
+    const end = vertices[endIndex];
+    const center = Cesium.Cartesian3.midpoint(start.position, end.position, new Cesium.Cartesian3());
+    const signs = {
+      x: Math.sign((start.signs.x || 0) + (end.signs.x || 0)),
+      y: Math.sign((start.signs.y || 0) + (end.signs.y || 0)),
+      z: Math.sign((start.signs.z || 0) + (end.signs.z || 0)),
+    };
+    return {
+      index,
+      start: start.position,
+      end: end.position,
+      center,
+      signs,
+      normal: computeWorldDirectionFromSigns(signs, entity),
+    };
+  });
+
+  return { vertices, edges, faces };
 }
 
 function removeObjectById(id) {
@@ -445,15 +901,374 @@ function focusOnEntity(entity) {
   });
 }
 
+function ensureProportionalIndicator() {
+  if (appState.proportionalIndicator) return;
+  const indicator = viewer.entities.add({
+    name: "proportional-indicator",
+    show: false,
+    allowPicking: false,
+    ellipsoid: {
+      radii: new Cesium.Cartesian3(appState.proportionalRadius, appState.proportionalRadius, appState.proportionalRadius),
+      material: Cesium.Color.fromCssColorString("#a855f7").withAlpha(0.12),
+      outline: true,
+      outlineColor: Cesium.Color.fromCssColorString("#a855f7").withAlpha(0.45),
+    },
+  });
+  indicator.cubeMetadata = { type: "helper" };
+  appState.proportionalIndicator = indicator;
+}
+
+function updateProportionalIndicator() {
+  ensureProportionalIndicator();
+  const indicator = appState.proportionalIndicator;
+  if (!indicator) return;
+  const shouldShow =
+    appState.objectMode === "edit" &&
+    appState.proportionalEditing &&
+    !!appState.selectedComponent &&
+    !!appState.selectedComponent.center;
+  indicator.show = shouldShow;
+  if (!shouldShow) return;
+  indicator.position = new Cesium.ConstantPositionProperty(
+    Cesium.Cartesian3.clone(appState.selectedComponent.center, new Cesium.Cartesian3())
+  );
+  indicator.ellipsoid.radii = new Cesium.Cartesian3(
+    appState.proportionalRadius,
+    appState.proportionalRadius,
+    appState.proportionalRadius
+  );
+}
+
+function destroyComponentOverlays(entity) {
+  if (!entity?.cubeMetadata?.componentOverlays) return;
+  const overlays = entity.cubeMetadata.componentOverlays;
+  overlays.all.forEach((overlay) => {
+    if (overlay && !overlay.isDestroyed()) {
+      viewer.entities.remove(overlay);
+    }
+  });
+  entity.cubeMetadata.componentOverlays = null;
+}
+
+function applyComponentVisibility(entity) {
+  const overlays = entity?.cubeMetadata?.componentOverlays;
+  if (!overlays) return;
+  overlays.all.forEach((overlay) => {
+    if (!overlay?.componentMetadata) return;
+    overlay.show = overlay.componentMetadata.kind === appState.componentMode;
+  });
+}
+
+function rebuildComponentOverlays(entity, options = {}) {
+  if (!entity?.cubeMetadata) return;
+  const previous = options.preserveSelection ? appState.selectedComponent : null;
+  const previousKey = previous ? { kind: previous.kind, index: previous.index } : null;
+  destroyComponentOverlays(entity);
+  const geometry = computeCubeGeometry(entity);
+  const overlays = { vertex: [], edge: [], face: [], all: [] };
+
+  geometry.vertices.forEach((vertex) => {
+    const overlay = viewer.entities.add({
+      name: `${entity.id}_vertex_${vertex.index}`,
+      position: vertex.position,
+      point: {
+        pixelSize: 11,
+        color: Cesium.Color.fromCssColorString("#38bdf8").withAlpha(0.95),
+        outlineColor: Cesium.Color.fromCssColorString("#0f172a"),
+        outlineWidth: 2,
+      },
+      show: appState.componentMode === "vertex",
+    });
+    overlay.cubeMetadata = { type: "component" };
+    overlay.componentMetadata = {
+      kind: "vertex",
+      index: vertex.index,
+      signs: vertex.signs,
+      normal: computeWorldDirectionFromSigns(vertex.signs, entity),
+      center: Cesium.Cartesian3.clone(vertex.position, new Cesium.Cartesian3()),
+      overlay,
+      owner: entity,
+    };
+    overlays.vertex.push(overlay);
+    overlays.all.push(overlay);
+  });
+
+  geometry.edges.forEach((edge) => {
+    const overlay = viewer.entities.add({
+      name: `${entity.id}_edge_${edge.index}`,
+      polyline: {
+        positions: [edge.start, edge.end],
+        width: 3,
+        material: Cesium.Color.fromCssColorString("#38bdf8"),
+      },
+      show: appState.componentMode === "edge",
+    });
+    overlay.cubeMetadata = { type: "component" };
+    overlay.componentMetadata = {
+      kind: "edge",
+      index: edge.index,
+      signs: edge.signs,
+      normal: computeWorldDirectionFromSigns(edge.signs, entity),
+      center: Cesium.Cartesian3.clone(edge.center, new Cesium.Cartesian3()),
+      overlay,
+      owner: entity,
+    };
+    overlays.edge.push(overlay);
+    overlays.all.push(overlay);
+  });
+
+  geometry.faces.forEach((face) => {
+    const overlay = viewer.entities.add({
+      name: `${entity.id}_face_${face.index}`,
+      polygon: {
+        hierarchy: new Cesium.PolygonHierarchy(face.vertices),
+        material: Cesium.Color.fromCssColorString("#3b82f6").withAlpha(0.18),
+        outline: true,
+        outlineColor: Cesium.Color.fromCssColorString("#2563eb").withAlpha(0.4),
+      },
+      show: appState.componentMode === "face",
+    });
+    overlay.cubeMetadata = { type: "component" };
+    overlay.componentMetadata = {
+      kind: "face",
+      index: face.index,
+      signs: face.signs,
+      normal: face.normal,
+      center: Cesium.Cartesian3.clone(face.center, new Cesium.Cartesian3()),
+      overlay,
+      owner: entity,
+    };
+    overlays.face.push(overlay);
+    overlays.all.push(overlay);
+  });
+
+  entity.cubeMetadata.componentOverlays = overlays;
+  applyComponentVisibility(entity);
+
+  if (previousKey) {
+    const restored = overlays.all.find(
+      (overlay) =>
+        overlay.componentMetadata &&
+        overlay.componentMetadata.kind === previousKey.kind &&
+        overlay.componentMetadata.index === previousKey.index
+    );
+    if (restored) {
+      setComponentSelection(restored.componentMetadata, { silent: true });
+      return;
+    }
+  }
+
+  if (!options.preserveSelection) {
+    setComponentSelection(null, { silent: true });
+  }
+}
+
+function setOverlayHighlight(component, active) {
+  if (!component?.overlay) return;
+  if (component.kind === "vertex" && component.overlay.point) {
+    component.overlay.point.pixelSize = active ? 15 : 11;
+    component.overlay.point.color = (active ? Cesium.Color.ORANGE : Cesium.Color.fromCssColorString("#38bdf8")).withAlpha(
+      active ? 1.0 : 0.95
+    );
+    component.overlay.point.outlineColor = active
+      ? Cesium.Color.fromCssColorString("#1e293b")
+      : Cesium.Color.fromCssColorString("#0f172a");
+  } else if (component.kind === "edge" && component.overlay.polyline) {
+    component.overlay.polyline.width = active ? 5 : 3;
+    component.overlay.polyline.material = active ? Cesium.Color.ORANGE : Cesium.Color.fromCssColorString("#38bdf8");
+  } else if (component.kind === "face" && component.overlay.polygon) {
+    component.overlay.polygon.material = (active
+      ? Cesium.Color.fromCssColorString("#f97316").withAlpha(0.28)
+      : Cesium.Color.fromCssColorString("#3b82f6").withAlpha(0.18));
+    component.overlay.polygon.outlineColor = active
+      ? Cesium.Color.fromCssColorString("#f97316").withAlpha(0.85)
+      : Cesium.Color.fromCssColorString("#2563eb").withAlpha(0.4);
+  }
+}
+
+function setComponentSelection(componentMetadata, options = {}) {
+  if (appState.selectedComponent) {
+    setOverlayHighlight(appState.selectedComponent, false);
+  }
+  appState.selectedComponent = componentMetadata || null;
+  if (componentMetadata) {
+    setOverlayHighlight(componentMetadata, true);
+  }
+  if (!options.silent) {
+    updateProportionalIndicator();
+  } else {
+    updateProportionalIndicator();
+  }
+}
+
+function clearComponentSelection() {
+  setComponentSelection(null, { silent: true });
+}
+
+function setObjectMode(mode) {
+  if (!mode || (mode !== "object" && mode !== "edit")) return;
+  if (appState.objectMode === mode) return;
+  appState.objectMode = mode;
+  if (objectModeButton) {
+    objectModeButton.classList.toggle("active", mode === "object");
+  }
+  if (editModeButton) {
+    editModeButton.classList.toggle("active", mode === "edit");
+  }
+  if (componentSwitch) {
+    componentSwitch.classList.toggle("hidden", mode !== "edit");
+  }
+  if (proportionalControls) {
+    proportionalControls.classList.toggle("hidden", mode !== "edit");
+  }
+
+  if (mode === "edit") {
+    ensureProportionalIndicator();
+    if (appState.selectedObject) {
+      rebuildComponentOverlays(appState.selectedObject);
+    }
+  } else {
+    if (appState.selectedObject) {
+      destroyComponentOverlays(appState.selectedObject);
+    }
+    clearComponentSelection();
+    updateProportionalIndicator();
+  }
+
+  updateModeIndicator();
+}
+
+function setComponentMode(mode) {
+  if (!mode || !["vertex", "edge", "face"].includes(mode)) return;
+  if (appState.componentMode === mode) return;
+  appState.componentMode = mode;
+  componentButtons.forEach((button) => {
+    const isActive = button.dataset.component === mode;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-pressed", String(isActive));
+  });
+  if (appState.selectedComponent && appState.selectedComponent.kind !== mode) {
+    clearComponentSelection();
+  }
+  if (appState.selectedObject && appState.objectMode === "edit") {
+    rebuildComponentOverlays(appState.selectedObject, { preserveSelection: true });
+  }
+}
+
+function toggleProportionalEditing(force) {
+  const nextState = typeof force === "boolean" ? force : !appState.proportionalEditing;
+  appState.proportionalEditing = nextState;
+  if (proportionalToggle) {
+    proportionalToggle.checked = nextState;
+  }
+  updateProportionalIndicator();
+}
+
+function updateProportionalRadius(value) {
+  const clamped = Cesium.Math.clamp(Number(value) || appState.proportionalRadius, 1, 50);
+  appState.proportionalRadius = clamped;
+  if (proportionalRadiusInput) {
+    proportionalRadiusInput.value = String(clamped);
+  }
+  if (proportionalRadiusValue) {
+    proportionalRadiusValue.textContent = `${clamped}m`;
+  }
+  updateProportionalIndicator();
+}
+
+function adjustProportionalRadius(delta) {
+  updateProportionalRadius(appState.proportionalRadius + delta);
+}
+
+function applyComponentTransform(session, totalDelta) {
+  if (!session?.component) return;
+  const { entity, initialDimensions, initialPosition, component } = session;
+  const magnitude = computeSignsMagnitude(component.signs);
+  const newDimensions = new Cesium.Cartesian3(
+    initialDimensions.x,
+    initialDimensions.y,
+    initialDimensions.z
+  );
+  const positionOffset = new Cesium.Cartesian3();
+  const axes = getEntityAxes(entity);
+  const axisKeys = ["x", "y", "z"];
+
+  axisKeys.forEach((axisKey) => {
+    const sign = component.signs[axisKey] || 0;
+    if (!sign) return;
+    const contribution = Math.abs(sign) / magnitude;
+    const axisDelta = totalDelta * contribution;
+    const baseValue = initialDimensions[axisKey];
+    let candidate = baseValue + axisDelta;
+    if (candidate < 0.2) candidate = 0.2;
+    const appliedDelta = candidate - baseValue;
+    newDimensions[axisKey] = candidate;
+    const axisVector = axes[axisKey];
+    const offsetVector = Cesium.Cartesian3.multiplyByScalar(
+      axisVector,
+      (appliedDelta / 2) * Math.sign(sign),
+      new Cesium.Cartesian3()
+    );
+    Cesium.Cartesian3.add(positionOffset, offsetVector, positionOffset);
+  });
+
+  if (appState.proportionalEditing) {
+    const geometry = computeCubeGeometry(entity);
+    const center = session.componentCenter || component.center;
+    const vertices = geometry.vertices.map((vertex) => {
+      const distance = Cesium.Cartesian3.distance(vertex.position, center);
+      return {
+        weight: computeProportionalWeight(distance, appState.proportionalRadius),
+        signs: vertex.signs,
+      };
+    });
+    const totalWeight = vertices.reduce((sum, vertex) => sum + vertex.weight, 0);
+    axisKeys.forEach((axisKey) => {
+      if (component.signs[axisKey]) return;
+      if (totalWeight <= Cesium.Math.EPSILON7) return;
+      const axisWeight = vertices.reduce((sum, vertex) => {
+        const contribution = Math.abs(vertex.signs[axisKey] || 0);
+        if (contribution === 0) return sum;
+        return sum + vertex.weight * contribution;
+      }, 0);
+      if (axisWeight <= Cesium.Math.EPSILON7) return;
+      const ratio = Cesium.Math.clamp(axisWeight / totalWeight, 0, 1);
+      const baseValue = initialDimensions[axisKey];
+      let candidate = baseValue + totalDelta * ratio * 0.5;
+      if (candidate < 0.2) candidate = 0.2;
+      newDimensions[axisKey] = candidate;
+    });
+  }
+
+  entity.box.dimensions = newDimensions;
+  if (entity.cubeMetadata) {
+    entity.cubeMetadata.dimensions = Cesium.Cartesian3.clone(newDimensions, new Cesium.Cartesian3());
+  }
+  const newPosition = Cesium.Cartesian3.add(initialPosition, positionOffset, new Cesium.Cartesian3());
+  entity.position = new Cesium.ConstantPositionProperty(newPosition);
+  updatePanels(entity);
+  updateGizmoPosition();
+  rebuildComponentOverlays(entity, { preserveSelection: true });
+  updateProportionalIndicator();
+}
+
 function setSelectedObject(entity) {
   if (appState.selectedObject === entity) {
     updatePanels(entity);
+    if (entity && appState.objectMode === "edit") {
+      rebuildComponentOverlays(entity, { preserveSelection: true });
+      updateProportionalIndicator();
+    }
+
     return;
   }
 
   if (Cesium.defined(appState.selectedObject)) {
+    destroyComponentOverlays(appState.selectedObject);
     restoreDefaultMaterial(appState.selectedObject);
   }
+  clearComponentSelection();
+
 
   appState.selectedObject = entity;
 
@@ -463,11 +1278,17 @@ function setSelectedObject(entity) {
     ensureGizmo(entity);
     refreshGizmoHighlight();
     parameterPanel.classList.remove("hidden");
+    if (appState.objectMode === "edit") {
+      rebuildComponentOverlays(entity);
+    }
+    updateProportionalIndicator();
+
     emitStateEvent("selection", { entity, selected: true });
   } else {
     hidePanels();
     removeGizmo();
     updatePropertyPanel(null);
+    updateProportionalIndicator();
 
     emitStateEvent("selection", { entity: null, selected: false });
   }
@@ -498,9 +1319,10 @@ function updatePanels(entity) {
   }
 
   const julianNow = Cesium.JulianDate.now();
-  const position = Cesium.Cartesian3.clone(entity.position.getValue(julianNow));
+  const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
   const dimensions = entity.box.dimensions.getValue(julianNow);
-  const orientation = Cesium.Quaternion.clone(entity.orientation.getValue(julianNow));
+  const orientation = Cesium.Quaternion.clone(getEntityOrientation(entity, julianNow));
+
   const hpr = Cesium.HeadingPitchRoll.fromQuaternion(orientation);
 
   parameterForm.width.value = dimensions.x.toFixed(2);
@@ -532,7 +1354,8 @@ function removeGizmo() {
 
 function computeAxisEndpoints(entity, axis, length = 20.0) {
   const julianNow = Cesium.JulianDate.now();
-  const position = entity.position.getValue(julianNow);
+  const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
+
   const baseMatrix = getEastNorthUpMatrix(position);
   const index = axis === "x" ? 0 : axis === "y" ? 1 : 2;
   const axisVector = Cesium.Matrix4.getColumn(baseMatrix, index, new Cesium.Cartesian3());
@@ -609,8 +1432,15 @@ function updateGizmoPosition() {
 
 function refreshGizmoHighlight() {
   if (!appState.gizmo) return;
+  const activeAxes =
+    appState.axisMode === "none"
+      ? []
+      : isPlaneConstraint(appState.axisMode)
+      ? getPlaneAxes(appState.axisMode)
+      : [appState.axisMode];
   Object.entries(appState.gizmo.axes).forEach(([axis, data]) => {
-    const active = appState.axisMode === axis;
+    const active = activeAxes.includes(axis);
+
     data.polyline.polyline.width = active ? 6 : 3;
     data.polyline.polyline.material = active
       ? data.color.withAlpha(1.0)
@@ -622,7 +1452,8 @@ function updateRotationBasis(session) {
   if (!session) return;
   const { entity } = session;
   const julianNow = Cesium.JulianDate.now();
-  const position = entity.position.getValue(julianNow);
+  const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
+
   const axisKey = session.activeAxis && session.activeAxis !== "none" ? session.activeAxis : "z";
   const axisVector = Cesium.Cartesian3.normalize(
     getAxisVector(axisKey, session.axisSpace, entity),
@@ -789,6 +1620,60 @@ if (selectionFilter) {
   });
 }
 
+if (objectModeButton && editModeButton) {
+  objectModeButton.addEventListener("click", () => setObjectMode("object"));
+  editModeButton.addEventListener("click", () => setObjectMode("edit"));
+}
+
+if (componentButtons.length) {
+  componentButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const mode = button.dataset.component;
+      setComponentMode(mode);
+    });
+  });
+}
+
+if (proportionalToggle) {
+  proportionalToggle.addEventListener("change", (event) => {
+    toggleProportionalEditing(event.target.checked);
+  });
+}
+
+if (proportionalRadiusInput) {
+  proportionalRadiusInput.addEventListener("input", (event) => {
+    updateProportionalRadius(event.target.value);
+  });
+}
+
+if (modifierAddButton && modifierTemplate) {
+  modifierAddButton.addEventListener("click", () => {
+    if (!appState.selectedObject) return;
+    const type = modifierTemplate.value;
+    const config = MODIFIER_LIBRARY[type];
+    if (!config) return;
+    const entity = appState.selectedObject;
+    if (!entity.cubeMetadata) return;
+    if (!Array.isArray(entity.cubeMetadata.modifiers)) {
+      entity.cubeMetadata.modifiers = [];
+    }
+    entity.cubeMetadata.modifiers.push({
+      id: `modifier-${++appState.modifierCounter}`,
+      type,
+      enabled: true,
+      params: { ...config.params },
+    });
+    renderModifierList(entity);
+    applyModifiers(entity);
+    applyMaterial(entity, { selected: true, force: true });
+  });
+}
+
+setObjectMode(appState.objectMode);
+setComponentMode(appState.componentMode);
+updateProportionalRadius(appState.proportionalRadius);
+toggleProportionalEditing(appState.proportionalEditing);
+
 
 transformForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -840,6 +1725,19 @@ function handleSelection(click) {
   if (appState.mode !== "view" && appState.mode !== "create") return;
 
   const picked = viewer.scene.pick(click.position);
+  if (appState.objectMode === "edit" && picked?.id?.componentMetadata) {
+    const component = picked.id.componentMetadata;
+    if (component.owner && !isSelectionAllowed(component.owner)) {
+      showSelectionFilteredHint();
+      return;
+    }
+    if (component.owner && component.owner !== appState.selectedObject) {
+      setSelectedObject(component.owner);
+    }
+    setComponentSelection(component);
+    return;
+  }
+
   if (Cesium.defined(picked) && picked.id && picked.id.box) {
     if (isSelectionAllowed(picked.id)) {
       setSelectedObject(picked.id);
@@ -853,12 +1751,14 @@ function handleSelection(click) {
 }
 
 handler.setInputAction((movement) => {
+  if (appState.cameraNavigationActive) return;
   if (appState.mode === "translate") {
-    performTranslate(movement.endPosition);
+    performTranslate(movement);
   } else if (appState.mode === "rotate") {
-    performRotate(movement.endPosition, movement.startPosition);
+    performRotate(movement);
   } else if (appState.mode === "scale") {
-    performScale(movement.endPosition, movement.startPosition);
+    performScale(movement);
+
   }
 }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
@@ -889,13 +1789,19 @@ function beginTransform(mode) {
     new Cesium.Cartesian3()
   );
 
+  let activeAxis = appState.axisMode;
+  if (mode !== "translate" && isPlaneConstraint(activeAxis)) {
+    activeAxis = "none";
+  }
+
   appState.transformSession = {
     mode,
     entity,
-    initialPosition: Cesium.Cartesian3.clone(entity.position.getValue(julianNow)),
-    initialOrientation: Cesium.Quaternion.clone(entity.orientation.getValue(julianNow)),
+    initialPosition: getEntityPosition(entity, julianNow, new Cesium.Cartesian3()),
+    initialOrientation: Cesium.Quaternion.clone(getEntityOrientation(entity, julianNow)),
     initialDimensions,
-    activeAxis: appState.axisMode,
+    activeAxis,
+
     axisSpace: appState.axisSpace,
     isShift: false,
     isCtrl: false,
@@ -903,6 +1809,35 @@ function beginTransform(mode) {
     numericApplied: false,
     lockProportion: false,
   };
+
+  if (appState.objectMode === "edit" && appState.selectedComponent) {
+    const component = appState.selectedComponent;
+    appState.transformSession.component = {
+      kind: component.kind,
+      index: component.index,
+      signs: { ...component.signs },
+      normal: computeWorldDirectionFromSigns(component.signs, entity),
+    };
+    appState.transformSession.componentCenter = Cesium.Cartesian3.clone(
+      component.center,
+      new Cesium.Cartesian3()
+    );
+    appState.transformSession.componentDelta = 0;
+    if (component.kind === "face") {
+      appState.axisMode = component.signs.x
+        ? "x"
+        : component.signs.y
+        ? "y"
+        : "z";
+      appState.axisSpace = "local";
+      updateAxisIndicator();
+    } else {
+      appState.axisMode = "none";
+      appState.axisSpace = "local";
+      updateAxisIndicator();
+    }
+  }
+
 
   const baseColor = entity.box.material.getValue(julianNow);
   entity.box.material = new Cesium.ColorMaterialProperty(baseColor.withAlpha(0.4));
@@ -929,6 +1864,11 @@ function commitTransform() {
   refreshGizmoHighlight();
   updatePanels(entity);
   updateGizmoPosition();
+  if (appState.objectMode === "edit") {
+    rebuildComponentOverlays(entity, { preserveSelection: true });
+    updateProportionalIndicator();
+  }
+
   emitStateEvent("transform", { phase: "commit", entity });
 }
 
@@ -938,6 +1878,14 @@ function cancelTransform() {
   entity.position = new Cesium.ConstantPositionProperty(initialPosition);
   entity.orientation = new Cesium.ConstantProperty(initialOrientation);
   entity.box.dimensions = new Cesium.Cartesian3(initialDimensions.x, initialDimensions.y, initialDimensions.z);
+  if (entity.cubeMetadata) {
+    entity.cubeMetadata.dimensions = new Cesium.Cartesian3(
+      initialDimensions.x,
+      initialDimensions.y,
+      initialDimensions.z
+    );
+  }
+
   clearRotationFeedback(appState.transformSession);
   restoreDefaultMaterial(entity);
   appState.transformSession = null;
@@ -949,6 +1897,11 @@ function cancelTransform() {
   refreshGizmoHighlight();
   updatePanels(entity);
   updateGizmoPosition();
+  if (appState.objectMode === "edit") {
+    rebuildComponentOverlays(entity);
+    updateProportionalIndicator();
+  }
+
   emitStateEvent("transform", { phase: "cancel", entity });
 }
 
@@ -962,13 +1915,25 @@ function setMode(mode) {
   transformPanel.classList.remove("hidden");
 }
 
-function computeDragPlane(entity, axis) {
-  const position = entity.position.getValue(Cesium.JulianDate.now());
+function computeDragPlane(entity, axis, axisSpace = appState.axisSpace) {
+  const julian = Cesium.JulianDate.now();
+  const position = getEntityPosition(entity, julian, new Cesium.Cartesian3());
+
   if (!axis || axis === "none") {
     const normal = getSurfaceNormal(position);
     return Cesium.Plane.fromPointNormal(position, normal);
   }
-  const axisVector = getAxisVector(axis, appState.axisSpace, entity);
+  if (isPlaneConstraint(axis)) {
+    const normalAxis = getPlaneNormalAxis(axis);
+    const normalVector = getAxisVector(normalAxis, axisSpace, entity);
+    if (Cesium.Cartesian3.magnitude(normalVector) < Cesium.Math.EPSILON7) {
+      const fallback = getSurfaceNormal(position);
+      return Cesium.Plane.fromPointNormal(position, fallback);
+    }
+    return Cesium.Plane.fromPointNormal(position, normalVector);
+  }
+  const axisVector = getAxisVector(axis, axisSpace, entity);
+
   const cameraDir = Cesium.Cartesian3.normalize(
     Cesium.Cartesian3.negate(viewer.camera.direction, new Cesium.Cartesian3()),
     new Cesium.Cartesian3()
@@ -984,12 +1949,28 @@ function computeDragPlane(entity, axis) {
   return Cesium.Plane.fromPointNormal(position, planeNormal);
 }
 
-function performTranslate(endPosition) {
+function performTranslate(movement) {
   const session = appState.transformSession;
   if (!session) return;
+  if (session.component) {
+    const delta = computeCursorDelta(movement.startPosition, movement.endPosition);
+    const scalar = delta.y * -0.1 + delta.x * 0.05;
+    let amount = scalar;
+    if (session.isShift) {
+      amount *= SHIFT_SLOW_RATIO;
+    }
+    if (session.isCtrl) {
+      amount = snapValue(amount, GRID_STEP * 0.5);
+    }
+    session.componentDelta = (session.componentDelta || 0) + amount;
+    session.lastDirection = session.component.normal;
+    applyComponentTransform(session, session.componentDelta);
+    return;
+  }
   const entity = session.entity;
-  const plane = computeDragPlane(entity, session.activeAxis);
-  const ray = viewer.camera.getPickRay(endPosition);
+  const plane = computeDragPlane(entity, session.activeAxis, session.axisSpace);
+  const ray = viewer.camera.getPickRay(movement.endPosition);
+
   if (!Cesium.defined(ray)) return;
   const t = Cesium.IntersectionTests.rayPlane(ray, plane);
   if (!Cesium.defined(t)) return;
@@ -998,13 +1979,25 @@ function performTranslate(endPosition) {
 
   let direction = delta;
   if (session.activeAxis && session.activeAxis !== "none") {
-    const axisVector = getAxisVector(session.activeAxis, session.axisSpace, entity);
-    const projected = Cesium.Cartesian3.multiplyByScalar(
-      axisVector,
-      Cesium.Cartesian3.dot(delta, axisVector),
-      new Cesium.Cartesian3()
-    );
-    direction = projected;
+    if (isPlaneConstraint(session.activeAxis)) {
+      const normalAxis = getPlaneNormalAxis(session.activeAxis);
+      const normalVector = getAxisVector(normalAxis, session.axisSpace, entity);
+      const projection = Cesium.Cartesian3.multiplyByScalar(
+        normalVector,
+        Cesium.Cartesian3.dot(delta, normalVector),
+        new Cesium.Cartesian3()
+      );
+      direction = Cesium.Cartesian3.subtract(delta, projection, new Cesium.Cartesian3());
+    } else {
+      const axisVector = getAxisVector(session.activeAxis, session.axisSpace, entity);
+      const projected = Cesium.Cartesian3.multiplyByScalar(
+        axisVector,
+        Cesium.Cartesian3.dot(delta, axisVector),
+        new Cesium.Cartesian3()
+      );
+      direction = projected;
+    }
+
   }
 
   if (session.isShift) {
@@ -1015,20 +2008,25 @@ function performTranslate(endPosition) {
     direction = snapVector(direction, GRID_STEP);
   }
 
-  session.lastDirection = Cesium.Cartesian3.normalize(direction, new Cesium.Cartesian3());
+  if (Cesium.Cartesian3.magnitude(direction) > Cesium.Math.EPSILON7) {
+    session.lastDirection = Cesium.Cartesian3.normalize(direction, new Cesium.Cartesian3());
+  }
+
   const newPosition = Cesium.Cartesian3.add(session.initialPosition, direction, new Cesium.Cartesian3());
   entity.position = new Cesium.ConstantPositionProperty(newPosition);
   updatePanels(entity);
   updateGizmoPosition();
 }
 
-function performRotate(endPosition, startPosition) {
+function performRotate(movement) {
+
   const session = appState.transformSession;
   if (!session) return;
   const entity = session.entity;
   const axisKey = session.activeAxis && session.activeAxis !== "none" ? session.activeAxis : "z";
   const axisVector = getAxisVector(axisKey, session.axisSpace, entity);
-  const delta = computeCursorDelta(startPosition, endPosition);
+  const delta = computeCursorDelta(movement.startPosition, movement.endPosition);
+
   const angle = Cesium.Math.toRadians(delta.x * 0.25);
   let finalAngle = angle;
   if (session.isCtrl) {
@@ -1067,11 +2065,26 @@ function computeCursorDelta(start, end) {
   };
 }
 
-function performScale(endPosition, startPosition) {
+function performScale(movement) {
   const session = appState.transformSession;
   if (!session) return;
+  if (session.component) {
+    const delta = computeCursorDelta(movement.startPosition, movement.endPosition);
+    let amount = delta.y * -0.12;
+    if (session.isShift) {
+      amount *= SHIFT_SLOW_RATIO;
+    }
+    if (session.isCtrl) {
+      amount = snapValue(amount, GRID_STEP * 0.5);
+    }
+    session.componentDelta = (session.componentDelta || 0) + amount;
+    session.lastDirection = session.component.normal;
+    applyComponentTransform(session, session.componentDelta);
+    return;
+  }
   const entity = session.entity;
-  const delta = computeCursorDelta(startPosition, endPosition);
+  const delta = computeCursorDelta(movement.startPosition, movement.endPosition);
+
   let scaleFactor = 1 + delta.y * -0.005;
   if (session.isShift) {
     scaleFactor = 1 + (delta.y * -0.0025);
@@ -1138,10 +2151,27 @@ function applyNumericInput() {
   }
   const session = appState.transformSession;
   const entity = session.entity;
+  if (session.component && (session.mode === "translate" || session.mode === "scale")) {
+    session.componentDelta = value;
+    session.lastDirection = session.component.normal;
+    applyComponentTransform(session, session.componentDelta);
+    session.numericApplied = true;
+    resetNumericBuffer();
+    return;
+  }
   if (session.mode === "translate") {
     let axisVector;
     if (session.activeAxis && session.activeAxis !== "none") {
-      axisVector = getAxisVector(session.activeAxis, session.axisSpace, entity);
+      if (isPlaneConstraint(session.activeAxis)) {
+        axisVector = session.lastDirection;
+        if (!axisVector) {
+          resetNumericBuffer();
+          return;
+        }
+      } else {
+        axisVector = getAxisVector(session.activeAxis, session.axisSpace, entity);
+      }
+
     } else if (session.lastDirection) {
       axisVector = session.lastDirection;
     } else {
@@ -1195,6 +2225,14 @@ function handleKeyDown(event) {
   if (event.repeat) return;
   const { key } = event;
 
+  if (key === "Tab") {
+    event.preventDefault();
+    const nextMode = appState.objectMode === "object" ? "edit" : "object";
+    setObjectMode(nextMode);
+    return;
+  }
+
+
   if (event.shiftKey && key.toLowerCase() === "a") {
     event.preventDefault();
     showAddMenu();
@@ -1228,6 +2266,14 @@ function handleKeyDown(event) {
     return;
   }
 
+  if (appState.objectMode === "edit" && ["1", "2", "3"].includes(key)) {
+    event.preventDefault();
+    const mapping = { "1": "vertex", "2": "edge", "3": "face" };
+    setComponentMode(mapping[key]);
+    return;
+  }
+
+
   if (appState.menuPinned && !appState.transformSession) {
     const lower = key.toLowerCase();
     if (lower === "m") {
@@ -1244,17 +2290,25 @@ function handleKeyDown(event) {
 
   if (["x", "y", "z"].includes(key.toLowerCase())) {
     event.preventDefault();
-    const axis = key.toLowerCase();
-    if (appState.axisMode === axis) {
+    const baseAxis = key.toLowerCase();
+    const usingPlane = event.shiftKey && !event.ctrlKey && !event.altKey;
+    const targetMode = usingPlane ? PLANE_AXIS_MAP[baseAxis] : baseAxis;
+    if (appState.axisMode === targetMode) {
+
       appState.axisSpace = appState.axisSpace === "global" ? "local" : "global";
     } else {
       appState.axisSpace = "global";
     }
-    appState.axisMode = axis;
+    appState.axisMode = targetMode;
     updateAxisIndicator();
     refreshGizmoHighlight();
     if (appState.transformSession) {
-      appState.transformSession.activeAxis = axis;
+      let appliedAxis = targetMode;
+      if (isPlaneConstraint(appliedAxis) && appState.transformSession.mode !== "translate") {
+        appliedAxis = "none";
+      }
+      appState.transformSession.activeAxis = appliedAxis;
+
       appState.transformSession.axisSpace = appState.axisSpace;
       if (appState.transformSession.mode === "rotate") {
         updateRotationBasis(appState.transformSession);
@@ -1267,6 +2321,13 @@ function handleKeyDown(event) {
     transformPanel.classList.toggle("hidden");
     return;
   }
+
+  if ((key === "o" || key === "O") && appState.objectMode === "edit") {
+    event.preventDefault();
+    toggleProportionalEditing();
+    return;
+  }
+
 
   if (appState.transformSession) {
     if (key === "Shift") {
@@ -1323,6 +2384,34 @@ document.addEventListener("click", (event) => {
     appState.menuPinned = false;
   }
 });
+
+const canvas = viewer.scene.canvas;
+canvas.addEventListener("pointerdown", (event) => {
+  if (event.button === 1 || (event.button === 0 && event.altKey)) {
+    appState.cameraNavigationActive = true;
+  }
+});
+canvas.addEventListener("pointerup", () => {
+  appState.cameraNavigationActive = false;
+});
+canvas.addEventListener("pointerleave", () => {
+  appState.cameraNavigationActive = false;
+});
+canvas.addEventListener("pointercancel", () => {
+  appState.cameraNavigationActive = false;
+});
+canvas.addEventListener(
+  "wheel",
+  (event) => {
+    if (appState.objectMode === "edit" && appState.proportionalEditing && appState.selectedComponent) {
+      const step = event.deltaY > 0 ? -1 : 1;
+      adjustProportionalRadius(step);
+      event.preventDefault();
+    }
+  },
+  { passive: false }
+);
+
 
 viewer.scene.postRender.addEventListener(() => {
   if (appState.selectedObject) {
