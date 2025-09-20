@@ -121,6 +121,8 @@ const appState = {
   proportionalIndicator: null,
   cameraNavigationActive: false,
   modifierCounter: 0,
+  viewRingSession: null,
+  skipNextClick: false,
 
 };
 
@@ -201,38 +203,139 @@ const modifierList = document.getElementById("modifier-list");
 
 const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
 
-handler.setInputAction((click) => {
-  if (appState.cameraNavigationActive) return;
-  if (!appState.selectedObject || !appState.gizmo) return;
-  if (appState.transformSession) return;
+function getPickedMetadata(picked) {
+  if (!picked) return null;
+  if (picked.gizmoMetadata) return picked.gizmoMetadata;
+  if (picked.cubeMetadata) return picked.cubeMetadata;
+  return null;
+}
 
-  const picked = viewer.scene.pick(click.position);
-  const metadata = picked?.id?.gizmoMetadata;
-  if (!metadata) {
-    return;
+function beginViewRingSession(pickedEntity, position) {
+  if (!pickedEntity || !position) return false;
+  const metadata = getPickedMetadata(pickedEntity);
+  if (!metadata || metadata.mode !== "view") {
+    return false;
   }
 
-  if (metadata.mode === "view") {
-    appState.axisMode = "none";
-    updateAxisIndicator();
+  if (appState.mode !== "view") {
+    return false;
+  }
+
+  const target = metadata.target || appState.selectedObject || appState.gizmo?.entity;
+  if (!target) {
+    return false;
+  }
+
+  const julianNow = Cesium.JulianDate.now();
+  const targetPosition = getEntityPosition(target, julianNow, new Cesium.Cartesian3());
+  if (!targetPosition) {
+    return false;
+  }
+
+  const cameraPosition = Cesium.Cartesian3.clone(viewer.camera.positionWC, new Cesium.Cartesian3());
+  const offset = Cesium.Cartesian3.subtract(cameraPosition, targetPosition, new Cesium.Cartesian3());
+  let range = Cesium.Cartesian3.magnitude(offset);
+  if (!Number.isFinite(range) || range < 1.0) {
+    range = 1.0;
+  }
+
+  const startPosition = Cesium.Cartesian2.clone(position, new Cesium.Cartesian2());
+  const session = {
+    target,
+    targetPosition,
+    startHeading: viewer.camera.heading,
+    startPitch: viewer.camera.pitch,
+    range,
+    startPosition,
+    lastPosition: Cesium.Cartesian2.clone(position, new Cesium.Cartesian2()),
+    headingOffset: 0,
+    pitchOffset: 0,
+    ringEntity: pickedEntity,
+    originalMaterial: null,
+    originalWidth: null,
+  };
+
+  if (pickedEntity.polyline) {
+    session.originalMaterial = pickedEntity.polyline.material;
+    session.originalWidth = pickedEntity.polyline.width;
+    pickedEntity.polyline.material = Cesium.Color.fromCssColorString("#f59e0b").withAlpha(0.9);
+    pickedEntity.polyline.width = (pickedEntity.polyline.width || 2) * 1.4;
+  }
+
+  appState.viewRingSession = session;
+  appState.cameraNavigationActive = true;
+  viewer.scene.canvas.style.cursor = "grabbing";
+
+  viewer.camera.lookAt(
+    session.targetPosition,
+    new Cesium.HeadingPitchRange(session.startHeading, session.startPitch, session.range)
+  );
+  return true;
+}
+
+function updateViewRingSession(movement) {
+  const session = appState.viewRingSession;
+  if (!session) return;
+  const current = movement?.endPosition || movement?.position;
+  if (!current) return;
+
+  if (!session.lastPosition) {
+    session.lastPosition = Cesium.Cartesian2.clone(current, new Cesium.Cartesian2());
+  }
+
+  const deltaX = current.x - session.lastPosition.x;
+  const deltaY = current.y - session.lastPosition.y;
+  session.lastPosition = Cesium.Cartesian2.clone(current, new Cesium.Cartesian2());
+
+  const headingSensitivity = 0.0055;
+  const pitchSensitivity = 0.005;
+
+  session.headingOffset -= deltaX * headingSensitivity;
+  session.pitchOffset -= deltaY * pitchSensitivity;
+
+  const maxPitch = Cesium.Math.PI_OVER_TWO - Cesium.Math.toRadians(1.0);
+  const newPitch = Cesium.Math.clamp(
+    session.startPitch + session.pitchOffset,
+    -maxPitch,
+    maxPitch
+  );
+  const newHeading = session.startHeading + session.headingOffset;
+
+  viewer.camera.lookAt(
+    session.targetPosition,
+    new Cesium.HeadingPitchRange(newHeading, newPitch, session.range)
+  );
+}
+
+function endViewRingSession({ cancelled = false } = {}) {
+  const session = appState.viewRingSession;
+  if (!session) return false;
+
+  if (session.ringEntity?.polyline) {
+    if (session.originalMaterial) {
+      session.ringEntity.polyline.material = session.originalMaterial;
+    }
+    if (session.originalWidth != null) {
+      session.ringEntity.polyline.width = session.originalWidth;
+    }
+  }
+
+  viewer.scene.canvas.style.cursor = "";
+  viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+
+  appState.viewRingSession = null;
+  appState.cameraNavigationActive = false;
+
+  if (cancelled) {
+    appState.skipNextClick = false;
+  }
+
+  if (!cancelled) {
     refreshGizmoHighlight();
-    return;
   }
+  return true;
+}
 
-  const axisValue = metadata.axis ?? "none";
-  const axisSpace = metadata.axisSpace || "local";
-  appState.axisMode = axisValue;
-  appState.axisSpace = axisSpace;
-  updateAxisIndicator();
-  refreshGizmoHighlight();
-
-  beginTransform(metadata.mode, {
-    axis: axisValue,
-    axisSpace,
-    lockProportion: Boolean(metadata.lockProportion),
-    fromGizmo: true,
-  });
-}, Cesium.ScreenSpaceEventType.LEFT_DOWN);
 let gizmoEntities = [];
 
 const GRID_STEP = 1.0;
@@ -1561,10 +1664,11 @@ function updatePanels(entity) {
 }
 
 function removeGizmo() {
+  endViewRingSession({ cancelled: true });
   gizmoEntities.forEach((e) => viewer.entities.remove(e));
   gizmoEntities = [];
   appState.gizmo = null;
-  
+
   // 清理轴端点缓存
   axisEndpointsCache.clear();
 }
@@ -1786,9 +1890,31 @@ function createUniversalGizmo(entity) {
 
   const baseRadius = computeRotationRadius(entity);
 
+  let viewRingEntity = null;
+  if (appState.mode === "view") {
+    const ringRadius = computeRotationRadius(entity) * 1.15;
+    viewRingEntity = viewer.entities.add({
+      polyline: {
+        positions: new Cesium.CallbackProperty(
+          () => computeViewAlignedCircle(entity, ringRadius),
+          false
+        ),
+        material: Cesium.Color.WHITE.withAlpha(0.45),
+        width: 2.5,
+        arcType: Cesium.ArcType.NONE,
+      },
+    });
+    viewRingEntity.gizmoMetadata = { type: "view-ring", mode: "view", target: entity };
+    gizmoEntities.push(viewRingEntity);
+  }
+
   ["x", "y", "z"].forEach((axis) => {
     const color = axisColors[axis];
-    const rotationColor = rotationColors[axis] || color;
+
+    // 使用缓存的轴端点计算
+    const cacheKey = `${entity.id}_${axis}`;
+    let cachedEndpoints = null;
+    
 
     const polyline = viewer.entities.add({
       polyline: {
@@ -1887,73 +2013,8 @@ function createUniversalGizmo(entity) {
     };
   });
 
-  Object.keys(planeColors).forEach((planeKey) => {
-    const color = planeColors[planeKey];
-    const planeEntity = viewer.entities.add({
-      polygon: {
-        hierarchy: new Cesium.CallbackProperty(
-          () => computePlaneHandleHierarchy(entity, planeKey),
-          false
-        ),
-        material: color.withAlpha(0.2),
-        outline: true,
-        outlineColor: color.withAlpha(0.65),
-        classificationType: Cesium.ClassificationType.BOTH,
-      },
-    });
-    planeEntity.gizmoMetadata = {
-      mode: "translate",
-      axis: planeKey,
-      axisSpace: "local",
-      kind: "plane",
-    };
-    gizmoEntities.push(planeEntity);
-    planes[planeKey] = { entity: planeEntity, graphics: planeEntity.polygon, color };
-  });
+  appState.gizmo = { entity, axes, type: "translate", viewRing: viewRingEntity };
 
-  const centerHandle = viewer.entities.add({
-    position: new Cesium.CallbackProperty(
-      () => getEntityPosition(entity, Cesium.JulianDate.now(), new Cesium.Cartesian3()),
-      false
-    ),
-    point: {
-      pixelSize: 12,
-      color: centerColor.withAlpha(0.95),
-      outlineColor: Cesium.Color.WHITE.withAlpha(0.9),
-      outlineWidth: 2,
-      disableDepthTestDistance: Number.POSITIVE_INFINITY,
-    },
-  });
-  centerHandle.gizmoMetadata = {
-    mode: "scale",
-    axis: "none",
-    axisSpace: "local",
-    kind: "uniform-scale",
-  };
-  gizmoEntities.push(centerHandle);
-
-  const viewRing = viewer.entities.add({
-    polyline: {
-      positions: new Cesium.CallbackProperty(() => computeViewAlignedCircle(entity, baseRadius * 1.2), false),
-      material: Cesium.Color.WHITE.withAlpha(0.55),
-      width: 2,
-      arcType: Cesium.ArcType.NONE,
-    },
-  });
-  viewRing.gizmoMetadata = {
-    mode: "view",
-    axis: "none",
-    kind: "view-ring",
-  };
-  gizmoEntities.push(viewRing);
-
-  appState.gizmo = {
-    entity,
-    axes,
-    planes,
-    center: { entity: centerHandle, graphics: centerHandle.point, color: centerColor },
-    view: { entity: viewRing, graphics: viewRing.polyline },
-  };
 }
 
 function computeRotationRadius(entity) {
@@ -2322,6 +2383,20 @@ function handleSelection(click) {
 }
 
 handler.setInputAction((movement) => {
+  if (!movement?.position) return;
+  const picked = viewer.scene.pick(movement.position);
+  const pickedEntity = picked?.id;
+  const metadata = getPickedMetadata(pickedEntity);
+  if (metadata && metadata.mode === "view") {
+    beginViewRingSession(pickedEntity, movement.position);
+  }
+}, Cesium.ScreenSpaceEventType.LEFT_DOWN);
+
+handler.setInputAction((movement) => {
+  if (appState.viewRingSession) {
+    updateViewRingSession(movement);
+    return;
+  }
   if (appState.cameraNavigationActive) return;
   if (appState.mode === "translate") {
     performTranslate(movement);
@@ -2333,9 +2408,21 @@ handler.setInputAction((movement) => {
   }
 }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
+handler.setInputAction(() => {
+  if (!appState.viewRingSession) return;
+  const ended = endViewRingSession();
+  if (ended) {
+    appState.skipNextClick = true;
+  }
+}, Cesium.ScreenSpaceEventType.LEFT_UP);
+
 handler.setInputAction((click) => {
   if (appState.mode === "translate" || appState.mode === "rotate" || appState.mode === "scale") {
     commitTransform();
+    return;
+  }
+  if (appState.cameraNavigationActive || appState.skipNextClick) {
+    appState.skipNextClick = false;
     return;
   }
   handleSelection(click);
@@ -2966,12 +3053,24 @@ canvas.addEventListener("pointerdown", (event) => {
 });
 canvas.addEventListener("pointerup", () => {
   appState.cameraNavigationActive = false;
+  if (appState.viewRingSession) {
+    const ended = endViewRingSession();
+    if (ended) {
+      appState.skipNextClick = true;
+    }
+  }
 });
 canvas.addEventListener("pointerleave", () => {
   appState.cameraNavigationActive = false;
+  if (appState.viewRingSession) {
+    endViewRingSession({ cancelled: true });
+  }
 });
 canvas.addEventListener("pointercancel", () => {
   appState.cameraNavigationActive = false;
+  if (appState.viewRingSession) {
+    endViewRingSession({ cancelled: true });
+  }
 });
 canvas.addEventListener(
   "wheel",
