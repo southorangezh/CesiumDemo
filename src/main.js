@@ -53,11 +53,21 @@ document.addEventListener('DOMContentLoaded', () => {
   setTimeout(ensureCesiumContainerSize, 100);
 });
 
+// 定时器引用，用于清理
+let containerSizeInterval;
+let cacheCleanupInterval;
+let performanceStatsInterval;
+
 // 定期检查容器尺寸（防止异常增长）
-setInterval(ensureCesiumContainerSize, 5000);
+containerSizeInterval = setInterval(ensureCesiumContainerSize, 5000);
+
+// 缓存声明 - 必须在使用前声明
+const materialCache = new Map();
+const geometryCache = new Map();
+const axisEndpointsCache = new Map();
 
 // 定期清理无效缓存
-setInterval(() => {
+cacheCleanupInterval = setInterval(() => {
   // 清理轴端点缓存中的无效数据
   for (const [key, data] of axisEndpointsCache) {
     if (!isValidCachedData(data)) {
@@ -75,7 +85,7 @@ setInterval(() => {
   // 清理材质缓存（材质缓存通常不会有无效数据，但为了安全起见）
   if (materialCache.size > 200) {
     const keys = Array.from(materialCache.keys());
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < Math.min(50, keys.length); i++) {
       materialCache.delete(keys[i]);
     }
   }
@@ -441,22 +451,37 @@ function getEntityOrientation(entity, julian = Cesium.JulianDate.now()) {
     return Cesium.Quaternion.IDENTITY;
   }
   const { orientation } = entity;
+  let quat;
+  
   if (orientation && typeof orientation.getValue === "function") {
-    return orientation.getValue(julian, new Cesium.Quaternion()) || Cesium.Quaternion.IDENTITY;
-  }
-  if (orientation instanceof Cesium.Quaternion) {
-    return orientation;
-  }
-  if (
+    quat = orientation.getValue(julian, new Cesium.Quaternion());
+  } else if (orientation instanceof Cesium.Quaternion) {
+    quat = orientation;
+  } else if (
     orientation &&
     typeof orientation.x === "number" &&
     typeof orientation.y === "number" &&
     typeof orientation.z === "number" &&
     typeof orientation.w === "number"
   ) {
-    return new Cesium.Quaternion(orientation.x, orientation.y, orientation.z, orientation.w);
+    quat = new Cesium.Quaternion(orientation.x, orientation.y, orientation.z, orientation.w);
+  } else {
+    quat = Cesium.Quaternion.IDENTITY;
   }
-  return Cesium.Quaternion.IDENTITY;
+  
+  // 验证四元数是否有效
+  if (!quat || !Cesium.defined(quat.x) || !Cesium.defined(quat.y) || !Cesium.defined(quat.z) || !Cesium.defined(quat.w) ||
+      !isFinite(quat.x) || !isFinite(quat.y) || !isFinite(quat.z) || !isFinite(quat.w)) {
+    return Cesium.Quaternion.IDENTITY;
+  }
+  
+  // 确保四元数是单位四元数
+  const magnitude = Math.sqrt(quat.x * quat.x + quat.y * quat.y + quat.z * quat.z + quat.w * quat.w);
+  if (magnitude === 0) {
+    return Cesium.Quaternion.IDENTITY;
+  }
+  
+  return Cesium.Quaternion.normalize(quat, new Cesium.Quaternion());
 }
 
 function getEntityDimensions(entity, julian = Cesium.JulianDate.now()) {
@@ -551,7 +576,73 @@ function getEastNorthUpMatrix(position) {
   return Cesium.Transforms.eastNorthUpToFixedFrame(position);
 }
 
+// 验证四元数是否有效
+function isValidQuaternion(quat) {
+  if (!quat || !Cesium.defined(quat.x) || !Cesium.defined(quat.y) || !Cesium.defined(quat.z) || !Cesium.defined(quat.w)) {
+    return false;
+  }
+  
+  if (!isFinite(quat.x) || !isFinite(quat.y) || !isFinite(quat.z) || !isFinite(quat.w)) {
+    return false;
+  }
+  
+  // 检查四元数是否为零向量
+  const magnitude = Math.sqrt(quat.x * quat.x + quat.y * quat.y + quat.z * quat.z + quat.w * quat.w);
+  return magnitude > 0;
+}
+
+// 验证 Cartesian3 是否有效
+function isValidCartesian3(vec) {
+  if (!vec || !Cesium.defined(vec.x) || !Cesium.defined(vec.y) || !Cesium.defined(vec.z)) {
+    return false;
+  }
+  
+  if (!isFinite(vec.x) || !isFinite(vec.y) || !isFinite(vec.z)) {
+    return false;
+  }
+  
+  return true;
+}
+
+// 验证 Matrix4 是否有效
+function isValidMatrix4(mat) {
+  if (!mat || !Cesium.defined(mat)) {
+    return false;
+  }
+  
+  // 检查矩阵的每个元素
+  for (let i = 0; i < 16; i++) {
+    const value = mat[i];
+    if (!Cesium.defined(value) || !isFinite(value)) {
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+// 验证相机位置是否安全
+function isCameraPositionSafe(position) {
+  if (!isValidCartesian3(position)) {
+    return false;
+  }
+  
+  // 检查高度是否合理（不能太高或太低）
+  const cartographic = Cesium.Cartographic.fromCartesian(position);
+  if (!cartographic) {
+    return false;
+  }
+  
+  const height = cartographic.height;
+  // 放宽高度限制，允许更广的范围
+  return height > -10000 && height < 1000000; // 高度在 -10km 到 1000km 之间
+}
+
 function getAxisVector(axis, space, entity) {
+  if (!entity) {
+    return Cesium.Cartesian3.ZERO;
+  }
+  
   const unit = new Cesium.Cartesian3();
   switch (axis) {
     case "x":
@@ -565,20 +656,45 @@ function getAxisVector(axis, space, entity) {
       break;
   }
 
-  if (!entity) {
-    return unit;
-  }
-
   if (space === "local") {
-    const orientationMatrix = Cesium.Matrix3.fromQuaternion(getEntityOrientation(entity), new Cesium.Matrix3());
+    const orientation = getEntityOrientation(entity);
+    if (!orientation || !isValidQuaternion(orientation)) {
+      return unit; // 返回默认轴向量
+    }
+    
+    const orientationMatrix = Cesium.Matrix3.fromQuaternion(orientation, new Cesium.Matrix3());
     const rotated = Cesium.Matrix3.multiplyByVector(orientationMatrix, unit, new Cesium.Cartesian3());
-    return Cesium.Cartesian3.normalize(rotated, rotated);
+    
+    // 验证旋转结果
+    if (!rotated || !Cesium.defined(rotated.x) || !Cesium.defined(rotated.y) || !Cesium.defined(rotated.z) ||
+        !isFinite(rotated.x) || !isFinite(rotated.y) || !isFinite(rotated.z)) {
+      return unit; // 返回默认轴向量
+    }
+    
+    const normalized = Cesium.Cartesian3.normalize(rotated, rotated);
+    return normalized && isValidCartesian3(normalized) ? normalized : unit;
   }
 
-  const enu = getEastNorthUpMatrix(getEntityPosition(entity));
+  const position = getEntityPosition(entity);
+  if (!position || !isValidCartesian3(position)) {
+    return unit; // 返回默认轴向量
+  }
+  
+  const enu = getEastNorthUpMatrix(position);
+  if (!enu || !isValidMatrix4(enu)) {
+    return unit; // 返回默认轴向量
+  }
 
   const vector = Cesium.Matrix4.getColumn(enu, axis === "x" ? 0 : axis === "y" ? 1 : 2, new Cesium.Cartesian3());
-  return Cesium.Cartesian3.normalize(vector, vector);
+  
+  // 验证向量
+  if (!vector || !Cesium.defined(vector.x) || !Cesium.defined(vector.y) || !Cesium.defined(vector.z) ||
+      !isFinite(vector.x) || !isFinite(vector.y) || !isFinite(vector.z)) {
+    return unit; // 返回默认轴向量
+  }
+  
+  const normalized = Cesium.Cartesian3.normalize(vector, vector);
+  return normalized && isValidCartesian3(normalized) ? normalized : unit;
 }
 
 function getEntityAxes(entity) {
@@ -705,8 +821,7 @@ function showSelectionFilteredHint() {
   }, 2000);
 }
 
-// 材质缓存
-const materialCache = new Map();
+// 材质缓存已在上面声明
 
 function applyMaterial(entity, options = {}) {
   if (!entity || !entity.cubeMetadata) return;
@@ -717,9 +832,13 @@ function applyMaterial(entity, options = {}) {
   const metadata = entity.cubeMetadata;
   const baseColor = metadata.runtimeColor || metadata.color || defaultCubeConfig.color;
   const outlineColor = metadata.runtimeOutline || metadata.outlineColor || defaultCubeConfig.outlineColor;
+  
+  // 确保颜色对象是 Cesium Color 类型
+  const safeBaseColor = baseColor instanceof Cesium.Color ? baseColor : defaultCubeConfig.color;
+  const safeOutlineColor = outlineColor instanceof Cesium.Color ? outlineColor : defaultCubeConfig.outlineColor;
   const fillEnabled = metadata.fillEnabled !== false;
   const outlineEnabled = metadata.outlineEnabled !== false;
-  const baseOpacityValue = metadata.runtimeOpacity ?? metadata.opacity ?? baseColor.alpha ?? 0.8;
+  const baseOpacityValue = metadata.runtimeOpacity ?? metadata.opacity ?? safeBaseColor.alpha ?? 0.8;
   const baseOpacity = Cesium.Math.clamp(baseOpacityValue, 0.05, 1.0);
 
   let finalAlpha = baseOpacity;
@@ -733,12 +852,12 @@ function applyMaterial(entity, options = {}) {
   }
 
   // 创建材质缓存键
-  const materialKey = `${entity.id}_${baseColor.red}_${baseColor.green}_${baseColor.blue}_${finalAlpha}_${fillEnabled}_${outlineEnabled}_${options.selected}_${appState.viewSettings.xray}`;
+  const materialKey = `${entity.id}_${safeBaseColor.red}_${safeBaseColor.green}_${safeBaseColor.blue}_${finalAlpha}_${fillEnabled}_${outlineEnabled}_${options.selected}_${appState.viewSettings.xray}`;
   
   // 检查材质缓存
   let material = materialCache.get(materialKey);
   if (!material) {
-    material = new Cesium.ColorMaterialProperty(baseColor.withAlpha(finalAlpha));
+    material = new Cesium.ColorMaterialProperty(safeBaseColor.withAlpha(finalAlpha));
     // 限制缓存大小
     if (materialCache.size > 100) {
       const firstKey = materialCache.keys().next().value;
@@ -750,7 +869,7 @@ function applyMaterial(entity, options = {}) {
   entity.box.fill = fillEnabled;
   entity.box.material = material;
   entity.box.outline = outlineEnabled || options.selected;
-  const displayOutlineColor = options.selected ? Cesium.Color.ORANGE : outlineColor;
+  const displayOutlineColor = options.selected ? Cesium.Color.ORANGE : safeOutlineColor;
   entity.box.outlineColor = displayOutlineColor.withAlpha(appState.viewSettings.xray ? 0.6 : 1.0);
 }
 
@@ -1010,11 +1129,22 @@ function handlePropertyFormInput(event) {
 
 
 function createCube(position, options = {}) {
+  // 验证位置是否有效
+  if (!position || !isValidCartesian3(position)) {
+    console.warn("无效的立方体位置，使用默认位置");
+    position = Cesium.Cartesian3.fromDegrees(0, 0, 100);
+  }
+
   const id = ++objectCounter;
   const name = `Cube_${id}`;
   const dimensions = options.dimensions || defaultCubeConfig.dimensions;
   const color = options.color || defaultCubeConfig.color;
   const outlineColor = options.outlineColor || defaultCubeConfig.outlineColor;
+
+  // 确保尺寸有效
+  const safeDimensions = isValidCartesian3(dimensions) ? dimensions : defaultCubeConfig.dimensions;
+  const safeColor = color instanceof Cesium.Color ? color : defaultCubeConfig.color;
+  const safeOutlineColor = outlineColor instanceof Cesium.Color ? outlineColor : defaultCubeConfig.outlineColor;
 
   const cubeEntity = viewer.entities.add({
     id: name,
@@ -1022,18 +1152,18 @@ function createCube(position, options = {}) {
     position,
     orientation: Cesium.Transforms.headingPitchRollQuaternion(position, new Cesium.HeadingPitchRoll()),
     box: {
-      dimensions: Cesium.Cartesian3.clone(dimensions),
-      material: color,
+      dimensions: Cesium.Cartesian3.clone(safeDimensions),
+      material: safeColor,
       outline: true,
-      outlineColor,
+      outlineColor: safeOutlineColor,
     },
   });
 
   cubeEntity.cubeMetadata = {
-    dimensions: Cesium.Cartesian3.clone(dimensions),
-    color,
-    outlineColor,
-    opacity: options.opacity ?? color.alpha ?? 0.8,
+    dimensions: Cesium.Cartesian3.clone(safeDimensions),
+    color: safeColor,
+    outlineColor: safeOutlineColor,
+    opacity: options.opacity ?? safeColor.alpha ?? 0.8,
     outlineEnabled: true,
     fillEnabled: true,
     type: "mesh",
@@ -1042,17 +1172,24 @@ function createCube(position, options = {}) {
   };
 
   appState.objects.set(name, cubeEntity);
-  applyModifiers(cubeEntity);
-  applyMaterial(cubeEntity, { selected: true, force: true });
+  
+  // 延迟应用材质和选择，确保实体完全创建
+  setTimeout(() => {
+    if (viewer.entities.contains(cubeEntity)) {
+      applyModifiers(cubeEntity);
+      applyMaterial(cubeEntity, { selected: true, force: true });
+      setSelectedObject(cubeEntity);
+      openParameterPanel();
+    }
+  }, 50);
 
+  // 延迟聚焦，避免闪烁
   focusOnEntity(cubeEntity);
-  setSelectedObject(cubeEntity);
-  openParameterPanel();
+  
   return cubeEntity;
 }
 
-// 几何计算缓存
-const geometryCache = new Map();
+// 几何计算缓存已在上面声明
 
 function computeCubeGeometry(entity) {
   if (!entity || !entity.box) return { vertices: [], edges: [], faces: [] };
@@ -1066,7 +1203,8 @@ function computeCubeGeometry(entity) {
     // 验证输入数据
     if (!dims || !Cesium.defined(dims.x) || !Cesium.defined(dims.y) || !Cesium.defined(dims.z) ||
         !isFinite(dims.x) || !isFinite(dims.y) || !isFinite(dims.z) ||
-        dims.x <= 0 || dims.y <= 0 || dims.z <= 0) {
+        dims.x <= 0 || dims.y <= 0 || dims.z <= 0 ||
+        dims.x > 10000 || dims.y > 10000 || dims.z > 10000) {
       console.warn("无效的立方体尺寸:", dims);
       return { vertices: [], edges: [], faces: [] };
     }
@@ -1190,32 +1328,133 @@ function getSpawnPosition() {
   const canvas = viewer.scene.canvas;
   const center = new Cesium.Cartesian2(canvas.clientWidth / 2, canvas.clientHeight / 2);
   let pick;
+  
+  // 尝试从屏幕中心拾取地面位置
   if (viewer.scene.pickPositionSupported) {
     pick = viewer.scene.pickPosition(center);
   }
+  
+  // 如果拾取失败，尝试从相机射线拾取
   if (!Cesium.defined(pick)) {
     const ray = viewer.camera.getPickRay(center);
     if (Cesium.defined(ray)) {
       pick = viewer.scene.globe.pick(ray, viewer.scene);
     }
   }
-  if (Cesium.defined(pick)) {
+  
+  // 如果拾取成功，验证位置是否有效
+  if (Cesium.defined(pick) && isValidCartesian3(pick)) {
     return pick;
   }
-  const cameraPosition = viewer.camera.positionWC;
+  
+  // 如果拾取失败，使用相机前方位置
+  let cameraPosition = viewer.camera.positionWC;
+  if (!isValidCartesian3(cameraPosition)) {
+    // 如果相机位置无效，使用默认位置
+    return Cesium.Cartesian3.fromDegrees(0, 0, 100);
+  }
+  
   const normal = getSurfaceNormal(cameraPosition);
-  return Cesium.Cartesian3.add(
+  if (!isValidCartesian3(normal)) {
+    // 如果法向量无效，使用默认方向
+    return Cesium.Cartesian3.add(
+      cameraPosition,
+      Cesium.Cartesian3.multiplyByScalar(Cesium.Cartesian3.UNIT_Z, -30.0, new Cesium.Cartesian3()),
+      new Cesium.Cartesian3()
+    );
+  }
+  
+  const spawnPos = Cesium.Cartesian3.add(
     cameraPosition,
     Cesium.Cartesian3.multiplyByScalar(normal, -30.0, new Cesium.Cartesian3()),
     new Cesium.Cartesian3()
   );
+  
+  // 验证最终位置
+  if (isValidCartesian3(spawnPos)) {
+    return spawnPos;
+  }
+  
+  // 如果所有方法都失败，返回相机前方安全位置
+  cameraPosition = viewer.camera.positionWC;
+  if (isValidCartesian3(cameraPosition)) {
+    const direction = viewer.camera.direction;
+    const up = viewer.camera.up;
+    const right = viewer.camera.right;
+    
+    // 计算相机前方 100 米的位置
+    const forward = Cesium.Cartesian3.multiplyByScalar(direction, -100, new Cesium.Cartesian3());
+    const safePosition = Cesium.Cartesian3.add(cameraPosition, forward, new Cesium.Cartesian3());
+    
+    if (isValidCartesian3(safePosition)) {
+      return safePosition;
+    }
+  }
+  
+  // 最后的备用方案
+  return Cesium.Cartesian3.fromDegrees(0, 0, 100);
 }
 
 function focusOnEntity(entity) {
-  viewer.flyTo(entity, {
-    offset: new Cesium.HeadingPitchRange(0, -0.5, 80),
-    duration: 0.8,
-  });
+  // 延迟执行 flyTo，确保立方体已经完全创建和渲染
+  setTimeout(() => {
+    if (entity && viewer.entities.contains(entity)) {
+      try {
+        // 获取实体位置
+        const julianNow = Cesium.JulianDate.now();
+        const entityPosition = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
+        
+        // 验证位置是否有效
+        if (!entityPosition || !isValidCartesian3(entityPosition)) {
+          console.warn("实体位置无效，跳过相机飞行");
+          return;
+        }
+        
+        // 计算合适的相机距离
+        const cameraPosition = viewer.camera.positionWC;
+        const distance = Cesium.Cartesian3.distance(cameraPosition, entityPosition);
+        const safeDistance = Math.max(50, Math.min(distance * 1.5, 500));
+        
+        // 使用更安全的飞行参数
+        viewer.flyTo(entity, {
+          offset: new Cesium.HeadingPitchRange(0, -0.3, safeDistance),
+          duration: 1.0,
+          maximumHeight: 50000, // 提高最大高度限制
+          pitchAdjustHeight: 0, // 禁用俯仰调整
+        }).then(() => {
+          // 飞行完成后检查相机位置，但只在真正异常时才重置
+          const finalPosition = viewer.camera.positionWC;
+          if (!isValidCartesian3(finalPosition)) {
+            console.warn("相机飞行后位置无效，重置相机");
+            viewer.camera.setView({
+              destination: Cesium.Cartesian3.fromDegrees(0, 0, 1000),
+              orientation: {
+                heading: 0.0,
+                pitch: -Cesium.Math.PI_OVER_TWO,
+                roll: 0.0
+              }
+            });
+          } else if (!isCameraPositionSafe(finalPosition)) {
+            // 只在位置明显异常时才重置
+            console.warn("相机位置超出安全范围，但继续使用");
+          }
+        }).catch((error) => {
+          console.warn("相机飞行失败:", error);
+          // 如果飞行失败，使用 setView 作为备用方案
+          viewer.camera.setView({
+            destination: entityPosition,
+            orientation: {
+              heading: 0.0,
+              pitch: -0.3,
+              roll: 0.0
+            }
+          });
+        });
+      } catch (error) {
+        console.warn("focusOnEntity 执行失败:", error);
+      }
+    }
+  }, 100);
 }
 
 function ensureProportionalIndicator() {
@@ -1678,10 +1917,16 @@ function computeAxisEndpoints(entity, axis, length = 20.0, space = "local") {
     return { start: Cesium.Cartesian3.ZERO, end: Cesium.Cartesian3.ZERO };
   }
 
+  // 验证长度参数
+  if (!isFinite(length) || length <= 0 || length > 10000) {
+    length = 20.0;
+  }
+
   const julianNow = Cesium.JulianDate.now();
   const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
 
-  if (!position || !Cesium.defined(position.x) || !Cesium.defined(position.y) || !Cesium.defined(position.z)) {
+  if (!position || !Cesium.defined(position.x) || !Cesium.defined(position.y) || !Cesium.defined(position.z) ||
+      !isFinite(position.x) || !isFinite(position.y) || !isFinite(position.z)) {
     return { start: Cesium.Cartesian3.ZERO, end: Cesium.Cartesian3.ZERO };
   }
 
@@ -1690,19 +1935,46 @@ function computeAxisEndpoints(entity, axis, length = 20.0, space = "local") {
     !axisVector ||
     !Cesium.defined(axisVector.x) ||
     !Cesium.defined(axisVector.y) ||
-    !Cesium.defined(axisVector.z)
+    !Cesium.defined(axisVector.z) ||
+    !isFinite(axisVector.x) || !isFinite(axisVector.y) || !isFinite(axisVector.z)
   ) {
     return { start: position, end: position };
   }
 
+  // 验证轴向量是否为零向量
+  const magnitude = Math.sqrt(axisVector.x * axisVector.x + axisVector.y * axisVector.y + axisVector.z * axisVector.z);
+  if (magnitude === 0) {
+    return { start: position, end: position };
+  }
+
   const normalized = Cesium.Cartesian3.normalize(axisVector, new Cesium.Cartesian3());
+  
+  // 验证归一化结果
+  if (!normalized || !Cesium.defined(normalized.x) || !Cesium.defined(normalized.y) || !Cesium.defined(normalized.z) ||
+      !isFinite(normalized.x) || !isFinite(normalized.y) || !isFinite(normalized.z)) {
+    return { start: position, end: position };
+  }
+
   const scaled = Cesium.Cartesian3.multiplyByScalar(normalized, length, new Cesium.Cartesian3());
+  
+  // 验证缩放结果
+  if (!scaled || !Cesium.defined(scaled.x) || !Cesium.defined(scaled.y) || !Cesium.defined(scaled.z) ||
+      !isFinite(scaled.x) || !isFinite(scaled.y) || !isFinite(scaled.z)) {
+    return { start: position, end: position };
+  }
+
   const endPoint = Cesium.Cartesian3.add(position, scaled, new Cesium.Cartesian3());
+  
+  // 验证最终结果
+  if (!endPoint || !Cesium.defined(endPoint.x) || !Cesium.defined(endPoint.y) || !Cesium.defined(endPoint.z) ||
+      !isFinite(endPoint.x) || !isFinite(endPoint.y) || !isFinite(endPoint.z)) {
+    return { start: position, end: position };
+  }
+
   return { start: position, end: endPoint };
 }
 
-// 缓存轴端点计算结果
-const axisEndpointsCache = new Map();
+// 缓存轴端点计算结果已在上面声明
 
 // 验证缓存数据的有效性
 function isValidCachedData(data) {
@@ -1910,6 +2182,7 @@ function createUniversalGizmo(entity) {
 
   ["x", "y", "z"].forEach((axis) => {
     const color = axisColors[axis];
+    const rotationColor = rotationColors[axis];
 
     // 使用缓存的轴端点计算
     const cacheKey = `${entity.id}_${axis}`;
@@ -2357,6 +2630,26 @@ function handleSelection(click) {
   if (appState.mode !== "view" && appState.mode !== "create") return;
 
   const picked = viewer.scene.pick(click.position);
+  
+  // 检查是否点击了 Gizmo
+  if (picked?.id?.gizmoMetadata) {
+    const metadata = picked.id.gizmoMetadata;
+    if (metadata.mode && metadata.axis) {
+      // 设置轴向约束
+      appState.axisMode = metadata.axis;
+      appState.axisSpace = metadata.axisSpace || "local";
+      updateAxisIndicator();
+      
+      // 开始相应的变换模式
+      beginTransform(metadata.mode, {
+        axis: metadata.axis,
+        axisSpace: metadata.axisSpace || "local",
+        fromGizmo: true
+      });
+      return;
+    }
+  }
+  
   if (appState.objectMode === "edit" && picked?.id?.componentMetadata) {
     const component = picked.id.componentMetadata;
     if (component.owner && !isSelectionAllowed(component.owner)) {
@@ -2504,7 +2797,9 @@ function beginTransform(mode, options = {}) {
 
 
   const baseColor = entity.box.material.getValue(julianNow);
-  entity.box.material = new Cesium.ColorMaterialProperty(baseColor.withAlpha(0.4));
+  // 确保 baseColor 是 Cesium Color 对象
+  const color = baseColor instanceof Cesium.Color ? baseColor : Cesium.Color.WHITE;
+  entity.box.material = new Cesium.ColorMaterialProperty(color.withAlpha(0.4));
   setMode(mode);
   updateGizmoPosition();
   resetNumericBuffer();
@@ -3167,10 +3462,23 @@ window.logPerformanceStats = () => performanceMonitor.logStats();
 
 // 每5秒输出一次性能统计（仅在开发模式下）
 if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-  setInterval(() => {
+  performanceStatsInterval = setInterval(() => {
     performanceMonitor.logStats();
   }, 5000);
 }
+
+// 页面卸载时清理定时器
+window.addEventListener('beforeunload', () => {
+  if (containerSizeInterval) {
+    clearInterval(containerSizeInterval);
+  }
+  if (cacheCleanupInterval) {
+    clearInterval(cacheCleanupInterval);
+  }
+  if (performanceStatsInterval) {
+    clearInterval(performanceStatsInterval);
+  }
+});
 
 updateModeIndicator();
 updateAxisIndicator();
