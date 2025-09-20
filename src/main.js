@@ -2334,12 +2334,17 @@ handler.setInputAction((movement) => {
 }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
 
 handler.setInputAction((click) => {
-  if (appState.mode === "translate" || appState.mode === "rotate" || appState.mode === "scale") {
-    commitTransform();
+  if (appState.transformSession) {
     return;
   }
   handleSelection(click);
 }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+handler.setInputAction(() => {
+  if (appState.mode === "translate" || appState.mode === "rotate" || appState.mode === "scale") {
+    commitTransform();
+  }
+}, Cesium.ScreenSpaceEventType.LEFT_UP);
 
 handler.setInputAction((click) => {
   if (appState.mode === "translate" || appState.mode === "rotate" || appState.mode === "scale") {
