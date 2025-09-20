@@ -2120,7 +2120,9 @@ function refreshGizmoHighlight() {
   if (appState.gizmo.planes) {
     Object.entries(appState.gizmo.planes).forEach(([planeKey, planeHandle]) => {
       const highlight = isPlaneActive && planeKey === axisMode && (activeMode === "translate" || activeMode === "view" || (session && session.mode === "translate"));
-      planeHandle.graphics.material = planeHandle.color.withAlpha(highlight ? 0.35 : 0.18);
+      planeHandle.graphics.material = new Cesium.ColorMaterialProperty(
+        planeHandle.color.withAlpha(highlight ? 0.35 : 0.18)
+      );
       planeHandle.graphics.outlineColor = planeHandle.color.withAlpha(highlight ? 0.85 : 0.55);
     });
   }
@@ -2286,7 +2288,38 @@ function createUniversalGizmo(entity) {
     };
   });
 
-  appState.gizmo = { entity, axes, type: "translate", viewRing: viewRingEntity };
+  ["xy", "yz", "xz"].forEach((planeKey) => {
+    const color = planeColors[planeKey];
+    const planeEntity = viewer.entities.add({
+      polygon: {
+        hierarchy: new Cesium.CallbackProperty(
+          () => computePlaneHandleHierarchy(entity, planeKey),
+          false
+        ),
+        material: new Cesium.ColorMaterialProperty(color.withAlpha(0.18)),
+        outline: true,
+        outlineColor: color.withAlpha(0.55),
+        perPositionHeight: true,
+      },
+    });
+
+    planeEntity.gizmoMetadata = {
+      mode: "translate",
+      axis: planeKey,
+      axisSpace: "local",
+      kind: "plane",
+    };
+
+    gizmoEntities.push(planeEntity);
+
+    planes[planeKey] = {
+      entity: planeEntity,
+      graphics: planeEntity.polygon,
+      color,
+    };
+  });
+
+  appState.gizmo = { entity, axes, planes, type: "translate", viewRing: viewRingEntity };
 
 }
 
