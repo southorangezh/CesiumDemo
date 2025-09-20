@@ -1374,12 +1374,55 @@ function ensureGizmo(entity) {
     return;
   }
 
-  if (appState.gizmo && appState.gizmo.entity === entity) {
+  const desiredType = appState.mode === "rotate" ? "rotate" : "translate";
+
+  if (
+    appState.gizmo &&
+    appState.gizmo.entity === entity &&
+    appState.gizmo.type === desiredType
+  ) {
     return;
   }
 
   removeGizmo();
 
+  if (desiredType === "rotate") {
+    createRotationGizmo(entity);
+  } else {
+    createTranslationGizmo(entity);
+  }
+
+  refreshGizmoHighlight();
+}
+
+function updateGizmoPosition() {
+  if (!appState.selectedObject) {
+    removeGizmo();
+    return;
+  }
+  ensureGizmo(appState.selectedObject);
+}
+
+function refreshGizmoHighlight() {
+  if (!appState.gizmo) return;
+  const activeAxes =
+    appState.axisMode === "none"
+      ? []
+      : isPlaneConstraint(appState.axisMode)
+      ? getPlaneAxes(appState.axisMode)
+      : [appState.axisMode];
+  Object.entries(appState.gizmo.axes).forEach(([axis, data]) => {
+    const active = activeAxes.includes(axis);
+    const width = active ? 6 : 3;
+    const alpha = active ? 1.0 : 0.7;
+    if (data.graphics) {
+      data.graphics.width = width;
+      data.graphics.material = data.color.withAlpha(alpha);
+    }
+  });
+}
+
+function createTranslationGizmo(entity) {
   const axisColors = {
     x: Cesium.Color.RED,
     y: Cesium.Color.LIME,
@@ -1418,34 +1461,110 @@ function ensureGizmo(entity) {
     });
 
     gizmoEntities.push(polyline, label);
-    axes[axis] = { polyline, label, color };
+    axes[axis] = { entity: polyline, graphics: polyline.polyline, label, color };
   });
 
-  appState.gizmo = { entity, axes };
-  refreshGizmoHighlight();
+  appState.gizmo = { entity, axes, type: "translate" };
 }
 
-function updateGizmoPosition() {
-  if (!appState.gizmo || !appState.selectedObject) return;
-  ensureGizmo(appState.selectedObject);
+function computeRotationRadius(entity) {
+  const julianNow = Cesium.JulianDate.now();
+  const dimensions = entity.box.dimensions.getValue(julianNow);
+  if (!dimensions) return 10.0;
+  const maxDim = Math.max(dimensions.x, dimensions.y, dimensions.z);
+  return Math.max(10.0, maxDim * 0.75);
 }
 
-function refreshGizmoHighlight() {
-  if (!appState.gizmo) return;
-  const activeAxes =
-    appState.axisMode === "none"
-      ? []
-      : isPlaneConstraint(appState.axisMode)
-      ? getPlaneAxes(appState.axisMode)
-      : [appState.axisMode];
-  Object.entries(appState.gizmo.axes).forEach(([axis, data]) => {
-    const active = activeAxes.includes(axis);
+function computeViewAlignedCircle(entity, radius, segments = 64) {
+  const julianNow = Cesium.JulianDate.now();
+  const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
+  const right = Cesium.Cartesian3.normalize(viewer.camera.right, new Cesium.Cartesian3());
+  const up = Cesium.Cartesian3.normalize(viewer.camera.up, new Cesium.Cartesian3());
+  const points = [];
+  for (let i = 0; i <= segments; i += 1) {
+    const angle = (i / segments) * Math.PI * 2;
+    const direction = Cesium.Cartesian3.add(
+      Cesium.Cartesian3.multiplyByScalar(right, Math.cos(angle), new Cesium.Cartesian3()),
+      Cesium.Cartesian3.multiplyByScalar(up, Math.sin(angle), new Cesium.Cartesian3()),
+      new Cesium.Cartesian3()
+    );
+    const scaled = Cesium.Cartesian3.multiplyByScalar(direction, radius, new Cesium.Cartesian3());
+    points.push(Cesium.Cartesian3.add(position, scaled, new Cesium.Cartesian3()));
+  }
+  return points;
+}
 
-    data.polyline.polyline.width = active ? 6 : 3;
-    data.polyline.polyline.material = active
-      ? data.color.withAlpha(1.0)
-      : data.color.withAlpha(0.7);
+function computeAxisArc(entity, axis, radius, segments = 48) {
+  const julianNow = Cesium.JulianDate.now();
+  const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
+  const axisVector = Cesium.Cartesian3.normalize(
+    getAxisVector(axis, "local", entity),
+    new Cesium.Cartesian3()
+  );
+  let reference = Cesium.Cartesian3.clone(Cesium.Cartesian3.UNIT_Z, new Cesium.Cartesian3());
+  if (Math.abs(Cesium.Cartesian3.dot(axisVector, reference)) > 0.9) {
+    reference = Cesium.Cartesian3.clone(Cesium.Cartesian3.UNIT_X, new Cesium.Cartesian3());
+  }
+  let perp1 = Cesium.Cartesian3.cross(axisVector, reference, new Cesium.Cartesian3());
+  if (Cesium.Cartesian3.magnitude(perp1) < Cesium.Math.EPSILON7) {
+    perp1 = Cesium.Cartesian3.cross(axisVector, Cesium.Cartesian3.UNIT_Y, new Cesium.Cartesian3());
+  }
+  Cesium.Cartesian3.normalize(perp1, perp1);
+  const perp2 = Cesium.Cartesian3.normalize(
+    Cesium.Cartesian3.cross(axisVector, perp1, new Cesium.Cartesian3()),
+    new Cesium.Cartesian3()
+  );
+  const start = -Math.PI / 1.5;
+  const end = Math.PI / 1.5;
+  const points = [];
+  for (let i = 0; i <= segments; i += 1) {
+    const t = start + ((end - start) * i) / segments;
+    const direction = Cesium.Cartesian3.add(
+      Cesium.Cartesian3.multiplyByScalar(perp1, Math.cos(t), new Cesium.Cartesian3()),
+      Cesium.Cartesian3.multiplyByScalar(perp2, Math.sin(t), new Cesium.Cartesian3()),
+      new Cesium.Cartesian3()
+    );
+    const scaled = Cesium.Cartesian3.multiplyByScalar(direction, radius, new Cesium.Cartesian3());
+    points.push(Cesium.Cartesian3.add(position, scaled, new Cesium.Cartesian3()));
+  }
+  return points;
+}
+
+function createRotationGizmo(entity) {
+  const radius = computeRotationRadius(entity);
+  const baseCircle = viewer.entities.add({
+    polyline: {
+      positions: new Cesium.CallbackProperty(() => computeViewAlignedCircle(entity, radius), false),
+      material: Cesium.Color.WHITE.withAlpha(0.65),
+      width: 2,
+      arcType: Cesium.ArcType.NONE,
+    },
   });
+  gizmoEntities.push(baseCircle);
+
+  const axisColors = {
+    x: Cesium.Color.fromCssColorString("#ff6b6b"),
+    y: Cesium.Color.fromCssColorString("#88ff88"),
+    z: Cesium.Color.fromCssColorString("#5ab4ff"),
+  };
+
+  const axes = {};
+
+  ["x", "y", "z"].forEach((axis) => {
+    const color = axisColors[axis];
+    const polyline = viewer.entities.add({
+      polyline: {
+        positions: new Cesium.CallbackProperty(() => computeAxisArc(entity, axis, radius * 0.9), false),
+        material: color.withAlpha(0.8),
+        width: 3,
+        arcType: Cesium.ArcType.NONE,
+      },
+    });
+    gizmoEntities.push(polyline);
+    axes[axis] = { entity: polyline, graphics: polyline.polyline, color };
+  });
+
+  appState.gizmo = { entity, axes, type: "rotate" };
 }
 
 function updateRotationBasis(session) {
@@ -1842,6 +1961,7 @@ function beginTransform(mode) {
   const baseColor = entity.box.material.getValue(julianNow);
   entity.box.material = new Cesium.ColorMaterialProperty(baseColor.withAlpha(0.4));
   setMode(mode);
+  updateGizmoPosition();
   resetNumericBuffer();
   refreshGizmoHighlight();
   if (mode === "rotate") {
