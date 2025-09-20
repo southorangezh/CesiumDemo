@@ -2180,6 +2180,27 @@ function createUniversalGizmo(entity) {
     gizmoEntities.push(viewRingEntity);
   }
 
+  const centerHandle = viewer.entities.add({
+    position: new Cesium.CallbackProperty(
+      () => getEntityPosition(entity, Cesium.JulianDate.now(), new Cesium.Cartesian3()),
+      false
+    ),
+    point: {
+      pixelSize: 12,
+      color: centerColor.withAlpha(0.9),
+      outlineColor: Cesium.Color.WHITE.withAlpha(0.75),
+      outlineWidth: 2,
+      disableDepthTestDistance: Number.POSITIVE_INFINITY,
+    },
+  });
+  centerHandle.gizmoMetadata = {
+    mode: "scale",
+    axis: "none",
+    axisSpace: "local",
+    kind: "center",
+  };
+  gizmoEntities.push(centerHandle);
+
   ["x", "y", "z"].forEach((axis) => {
     const color = axisColors[axis];
     const rotationColor = rotationColors[axis];
@@ -2286,7 +2307,14 @@ function createUniversalGizmo(entity) {
     };
   });
 
-  appState.gizmo = { entity, axes, type: "translate", viewRing: viewRingEntity };
+  appState.gizmo = {
+    entity,
+    axes,
+    planes,
+    center: { entity: centerHandle, graphics: centerHandle.point, color: centerColor },
+    type: "translate",
+    viewRing: viewRingEntity,
+  };
 
 }
 
@@ -2743,15 +2771,22 @@ function beginTransform(mode, options = {}) {
   const dimensionValue = getEntityDimensions(entity, julianNow) || defaultCubeConfig.dimensions;
   const initialDimensions = Cesium.Cartesian3.clone(dimensionValue, new Cesium.Cartesian3());
 
+  let transformMode = mode;
   let activeAxis = options.axis ?? appState.axisMode;
-  if (mode !== "translate" && isPlaneConstraint(activeAxis)) {
+
+  if (options.axis === "none") {
+    transformMode = "scale";
+    activeAxis = "none";
+  }
+
+  if (transformMode !== "translate" && isPlaneConstraint(activeAxis)) {
     activeAxis = "none";
   }
 
   const axisSpace = options.axisSpace || appState.axisSpace;
 
   appState.transformSession = {
-    mode,
+    mode: transformMode,
     entity,
     initialPosition: getEntityPosition(entity, julianNow, new Cesium.Cartesian3()),
     initialOrientation: Cesium.Quaternion.clone(getEntityOrientation(entity, julianNow)),
@@ -2800,14 +2835,14 @@ function beginTransform(mode, options = {}) {
   // 确保 baseColor 是 Cesium Color 对象
   const color = baseColor instanceof Cesium.Color ? baseColor : Cesium.Color.WHITE;
   entity.box.material = new Cesium.ColorMaterialProperty(color.withAlpha(0.4));
-  setMode(mode);
+  setMode(transformMode);
   updateGizmoPosition();
   resetNumericBuffer();
   refreshGizmoHighlight();
-  if (mode === "rotate") {
+  if (transformMode === "rotate") {
     setupRotationFeedback(appState.transformSession);
   }
-  emitStateEvent("transform", { phase: "start", mode });
+  emitStateEvent("transform", { phase: "start", mode: transformMode });
 }
 
 function commitTransform() {
