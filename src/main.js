@@ -335,6 +335,7 @@ function endViewRingSession({ cancelled = false } = {}) {
   }
   return true;
 }
+
 let gizmoEntities = [];
 
 const GRID_STEP = 1.0;
@@ -456,6 +457,25 @@ function getEntityOrientation(entity, julian = Cesium.JulianDate.now()) {
     return new Cesium.Quaternion(orientation.x, orientation.y, orientation.z, orientation.w);
   }
   return Cesium.Quaternion.IDENTITY;
+}
+
+function getEntityDimensions(entity, julian = Cesium.JulianDate.now()) {
+  if (!entity || !entity.box || !entity.box.dimensions) {
+    return null;
+  }
+  const { dimensions } = entity.box;
+  if (dimensions && typeof dimensions.getValue === "function") {
+    return dimensions.getValue(julian, new Cesium.Cartesian3());
+  }
+  if (
+    dimensions &&
+    typeof dimensions.x === "number" &&
+    typeof dimensions.y === "number" &&
+    typeof dimensions.z === "number"
+  ) {
+    return dimensions;
+  }
+  return null;
 }
 
 function isPlaneConstraint(axis) {
@@ -1653,38 +1673,31 @@ function removeGizmo() {
   axisEndpointsCache.clear();
 }
 
-function computeAxisEndpoints(entity, axis, length = 20.0) {
+function computeAxisEndpoints(entity, axis, length = 20.0, space = "local") {
   if (!entity) {
     return { start: Cesium.Cartesian3.ZERO, end: Cesium.Cartesian3.ZERO };
   }
-  
+
   const julianNow = Cesium.JulianDate.now();
   const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
-  
-  // 检查位置是否有效
+
   if (!position || !Cesium.defined(position.x) || !Cesium.defined(position.y) || !Cesium.defined(position.z)) {
     return { start: Cesium.Cartesian3.ZERO, end: Cesium.Cartesian3.ZERO };
   }
 
-  const baseMatrix = getEastNorthUpMatrix(position);
-  if (!baseMatrix) {
+  const axisVector = getAxisVector(axis, space, entity);
+  if (
+    !axisVector ||
+    !Cesium.defined(axisVector.x) ||
+    !Cesium.defined(axisVector.y) ||
+    !Cesium.defined(axisVector.z)
+  ) {
     return { start: position, end: position };
   }
-  
-  const index = axis === "x" ? 0 : axis === "y" ? 1 : 2;
-  const axisVector = Cesium.Matrix4.getColumn(baseMatrix, index, new Cesium.Cartesian3());
-  
-  // 检查轴向量是否有效
-  if (!axisVector || !Cesium.defined(axisVector.x) || !Cesium.defined(axisVector.y) || !Cesium.defined(axisVector.z)) {
-    return { start: position, end: position };
-  }
-  
-  Cesium.Cartesian3.normalize(axisVector, axisVector);
-  const endPoint = Cesium.Cartesian3.add(
-    position,
-    Cesium.Cartesian3.multiplyByScalar(axisVector, length, new Cesium.Cartesian3()),
-    new Cesium.Cartesian3()
-  );
+
+  const normalized = Cesium.Cartesian3.normalize(axisVector, new Cesium.Cartesian3());
+  const scaled = Cesium.Cartesian3.multiplyByScalar(normalized, length, new Cesium.Cartesian3());
+  const endPoint = Cesium.Cartesian3.add(position, scaled, new Cesium.Cartesian3());
   return { start: position, end: endPoint };
 }
 
@@ -1700,30 +1713,89 @@ function isValidCachedData(data) {
   return true;
 }
 
+function getCachedAxisEndpoints(entity, axis, length = 20.0, space = "local") {
+  const cacheKey = `${entity.id}_${axis}_${space}_${length.toFixed(2)}`;
+  if (axisEndpointsCache.has(cacheKey)) {
+    const cached = axisEndpointsCache.get(cacheKey);
+    if (isValidCachedData(cached) && cached.entity === entity) {
+      return cached.points;
+    }
+    axisEndpointsCache.delete(cacheKey);
+  }
+  const points = computeAxisEndpoints(entity, axis, length, space);
+  axisEndpointsCache.set(cacheKey, { entity, points });
+
+  // 清除同一实体/轴的旧缓存，避免无限增长
+  for (const key of axisEndpointsCache.keys()) {
+    if (key.startsWith(`${entity.id}_${axis}_${space}_`) && key !== cacheKey) {
+      axisEndpointsCache.delete(key);
+    }
+  }
+
+  return points;
+}
+
+function computeGizmoAxisLength(entity) {
+  const julianNow = Cesium.JulianDate.now();
+  const dimensions = getEntityDimensions(entity, julianNow);
+  if (!dimensions) {
+    return 20.0;
+  }
+  const maxDim = Math.max(dimensions.x, dimensions.y, dimensions.z);
+  return Math.max(12.0, maxDim * 1.3);
+}
+
+function computePlaneHandleHierarchy(entity, planeKey, sizeMultiplier = 1.0) {
+  if (!entity) {
+    return new Cesium.PolygonHierarchy([]);
+  }
+  const julianNow = Cesium.JulianDate.now();
+  const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
+  const axes = getPlaneAxes(planeKey);
+  if (axes.length !== 2) {
+    return new Cesium.PolygonHierarchy([]);
+  }
+
+  const length = computeGizmoAxisLength(entity) * 0.65 * sizeMultiplier;
+  const offsetFraction = 0.35;
+  const axisA = Cesium.Cartesian3.multiplyByScalar(
+    getAxisVector(axes[0], "local", entity),
+    length,
+    new Cesium.Cartesian3()
+  );
+  const axisB = Cesium.Cartesian3.multiplyByScalar(
+    getAxisVector(axes[1], "local", entity),
+    length,
+    new Cesium.Cartesian3()
+  );
+
+  const originOffset = Cesium.Cartesian3.add(
+    Cesium.Cartesian3.multiplyByScalar(axisA, offsetFraction, new Cesium.Cartesian3()),
+    Cesium.Cartesian3.multiplyByScalar(axisB, offsetFraction, new Cesium.Cartesian3()),
+    new Cesium.Cartesian3()
+  );
+
+  const origin = Cesium.Cartesian3.add(position, originOffset, new Cesium.Cartesian3());
+  const corner1 = Cesium.Cartesian3.clone(origin, new Cesium.Cartesian3());
+  const corner2 = Cesium.Cartesian3.add(origin, axisA, new Cesium.Cartesian3());
+  const corner3 = Cesium.Cartesian3.add(origin, Cesium.Cartesian3.add(axisA, axisB, new Cesium.Cartesian3()), new Cesium.Cartesian3());
+  const corner4 = Cesium.Cartesian3.add(origin, axisB, new Cesium.Cartesian3());
+
+  return new Cesium.PolygonHierarchy([corner1, corner2, corner3, corner4]);
+}
+
 function ensureGizmo(entity) {
   if (!entity) {
     removeGizmo();
     return;
   }
 
-  const desiredType = appState.mode === "rotate" ? "rotate" : "translate";
-
-  if (
-    appState.gizmo &&
-    appState.gizmo.entity === entity &&
-    appState.gizmo.type === desiredType
-  ) {
+  if (appState.gizmo && appState.gizmo.entity === entity) {
     return;
   }
 
   removeGizmo();
-
-  if (desiredType === "rotate") {
-    createRotationGizmo(entity);
-  } else {
-    createTranslationGizmo(entity);
-  }
-
+  createUniversalGizmo(entity);
   refreshGizmoHighlight();
 }
 
@@ -1737,31 +1809,86 @@ function updateGizmoPosition() {
 
 function refreshGizmoHighlight() {
   if (!appState.gizmo) return;
-  const activeAxes =
-    appState.axisMode === "none"
-      ? []
-      : isPlaneConstraint(appState.axisMode)
-      ? getPlaneAxes(appState.axisMode)
-      : [appState.axisMode];
-  Object.entries(appState.gizmo.axes).forEach(([axis, data]) => {
-    const active = activeAxes.includes(axis);
-    const width = active ? 6 : 3;
-    const alpha = active ? 1.0 : 0.7;
-    if (data.graphics) {
-      data.graphics.width = width;
-      data.graphics.material = data.color.withAlpha(alpha);
+
+  const session = appState.transformSession;
+  const sessionAxis = session && session.activeAxis ? session.activeAxis : null;
+  const axisMode = sessionAxis && sessionAxis !== "none" ? sessionAxis : appState.axisMode;
+  const activeMode = session ? session.mode : appState.mode;
+
+  const isPlaneActive = isPlaneConstraint(axisMode);
+  const planeAxes = isPlaneActive ? getPlaneAxes(axisMode) : [];
+  const highlightedAxes = new Set();
+  planeAxes.forEach((axis) => highlightedAxes.add(axis));
+  if (axisMode && axisMode !== "none" && !isPlaneActive) {
+    highlightedAxes.add(axisMode);
+  }
+
+  Object.entries(appState.gizmo.axes).forEach(([axis, handleSet]) => {
+    const translateHighlight = highlightedAxes.has(axis) && (activeMode === "translate" || activeMode === "view" || (session && session.mode === "translate"));
+    const scaleHighlight = highlightedAxes.has(axis) && (activeMode === "scale" || activeMode === "view" || (session && session.mode === "scale"));
+    const rotateHighlight = !isPlaneActive && axisMode === axis && (activeMode === "rotate" || activeMode === "view" || (session && session.mode === "rotate"));
+
+    if (handleSet.translate?.graphics) {
+      handleSet.translate.graphics.width = translateHighlight ? 6 : 4;
+      handleSet.translate.graphics.material = handleSet.translate.color.withAlpha(translateHighlight ? 1.0 : 0.55);
+    }
+
+    if (handleSet.rotate?.graphics) {
+      handleSet.rotate.graphics.width = rotateHighlight ? 5 : 3;
+      handleSet.rotate.graphics.material = handleSet.rotate.color.withAlpha(rotateHighlight ? 1.0 : 0.45);
+    }
+
+    if (handleSet.scale?.graphics) {
+      handleSet.scale.graphics.pixelSize = scaleHighlight ? 16 : 12;
+      handleSet.scale.graphics.color = handleSet.scale.color.withAlpha(scaleHighlight ? 1.0 : 0.85);
+      handleSet.scale.graphics.outlineColor = Cesium.Color.WHITE.withAlpha(scaleHighlight ? 1.0 : 0.7);
     }
   });
+
+  if (appState.gizmo.planes) {
+    Object.entries(appState.gizmo.planes).forEach(([planeKey, planeHandle]) => {
+      const highlight = isPlaneActive && planeKey === axisMode && (activeMode === "translate" || activeMode === "view" || (session && session.mode === "translate"));
+      planeHandle.graphics.material = planeHandle.color.withAlpha(highlight ? 0.35 : 0.18);
+      planeHandle.graphics.outlineColor = planeHandle.color.withAlpha(highlight ? 0.85 : 0.55);
+    });
+  }
+
+  if (appState.gizmo.center?.graphics) {
+    const centerActive =
+      (session && session.mode === "scale" && (!session.activeAxis || session.activeAxis === "none")) ||
+      (!session && activeMode === "scale" && (!axisMode || axisMode === "none"));
+    const centerPoint = appState.gizmo.center.graphics;
+    centerPoint.pixelSize = centerActive ? 16 : 12;
+    centerPoint.color = appState.gizmo.center.color.withAlpha(centerActive ? 1.0 : 0.9);
+    centerPoint.outlineColor = Cesium.Color.WHITE.withAlpha(centerActive ? 1.0 : 0.75);
+  }
 }
 
-function createTranslationGizmo(entity) {
+function createUniversalGizmo(entity) {
   const axisColors = {
-    x: Cesium.Color.RED,
-    y: Cesium.Color.LIME,
-    z: Cesium.Color.SKYBLUE,
+    x: Cesium.Color.fromCssColorString("#ff6b6b"),
+    y: Cesium.Color.fromCssColorString("#51ff8f"),
+    z: Cesium.Color.fromCssColorString("#64b5ff"),
   };
 
-  const axes = {};
+  const rotationColors = {
+    x: Cesium.Color.fromCssColorString("#ff8c69"),
+    y: Cesium.Color.fromCssColorString("#7dff7a"),
+    z: Cesium.Color.fromCssColorString("#84c7ff"),
+  };
+
+  const planeColors = {
+    xy: Cesium.Color.fromCssColorString("#ffd166"),
+    yz: Cesium.Color.fromCssColorString("#06d6a0"),
+    xz: Cesium.Color.fromCssColorString("#118ab2"),
+  };
+
+  const axes = { x: {}, y: {}, z: {} };
+  const planes = {};
+
+  const centerColor = Cesium.Color.fromCssColorString("#ff9f1c");
+
+  const baseRadius = computeRotationRadius(entity);
 
   let viewRingEntity = null;
   if (appState.mode === "view") {
@@ -1788,62 +1915,36 @@ function createTranslationGizmo(entity) {
     const cacheKey = `${entity.id}_${axis}`;
     let cachedEndpoints = null;
     
+
     const polyline = viewer.entities.add({
       polyline: {
         positions: new Cesium.CallbackProperty(() => {
           try {
-            // 检查缓存
-            if (axisEndpointsCache.has(cacheKey)) {
-              const cachedData = axisEndpointsCache.get(cacheKey);
-              if (isValidCachedData(cachedData) && cachedData.entity === entity) {
-                return [cachedData.points.start, cachedData.points.end];
-              } else {
-                // 清理无效缓存
-                axisEndpointsCache.delete(cacheKey);
-              }
-            }
-            
-            const points = computeAxisEndpoints(entity, axis);
-            // 验证计算结果
-            if (!points || !points.start || !points.end) {
-              return [Cesium.Cartesian3.ZERO, Cesium.Cartesian3.ZERO];
-            }
-            
-            // 更新缓存
-            axisEndpointsCache.set(cacheKey, { entity, points });
-            cachedEndpoints = points;
+            const length = computeGizmoAxisLength(entity);
+            const points = getCachedAxisEndpoints(entity, axis, length, "local");
             return [points.start, points.end];
           } catch (error) {
-            console.warn(`Gizmo polyline 计算错误 (${axis}):`, error);
+            console.warn(`Gizmo axis 计算错误 (${axis}):`, error);
             return [Cesium.Cartesian3.ZERO, Cesium.Cartesian3.ZERO];
           }
         }, false),
-        material: color.withAlpha(0.7),
-        width: 3,
+        material: color.withAlpha(0.65),
+        width: 4,
+        arcType: Cesium.ArcType.NONE,
       },
     });
+    polyline.gizmoMetadata = {
+      mode: "translate",
+      axis,
+      axisSpace: "local",
+      kind: "axis",
+    };
 
     const label = viewer.entities.add({
       position: new Cesium.CallbackProperty(() => {
         try {
-          // 使用相同的缓存逻辑
-          if (axisEndpointsCache.has(cacheKey)) {
-            const cachedData = axisEndpointsCache.get(cacheKey);
-            if (isValidCachedData(cachedData) && cachedData.entity === entity) {
-              return cachedData.points.end;
-            } else {
-              // 清理无效缓存
-              axisEndpointsCache.delete(cacheKey);
-            }
-          }
-          
-          const points = computeAxisEndpoints(entity, axis);
-          if (!points || !points.end) {
-            return Cesium.Cartesian3.ZERO;
-          }
-          
-          axisEndpointsCache.set(cacheKey, { entity, points });
-          cachedEndpoints = points;
+          const length = computeGizmoAxisLength(entity);
+          const points = getCachedAxisEndpoints(entity, axis, length, "local");
           return points.end;
         } catch (error) {
           console.warn(`Gizmo label 计算错误 (${axis}):`, error);
@@ -1853,24 +1954,72 @@ function createTranslationGizmo(entity) {
       label: {
         text: axis.toUpperCase(),
         font: "16px Inter",
-        fillColor: color,
+        fillColor: color.withAlpha(0.95),
         showBackground: true,
         backgroundColor: Cesium.Color.BLACK.withAlpha(0.45),
         distanceDisplayCondition: new Cesium.DistanceDisplayCondition(0.0, 1000000.0),
-        pixelOffset: new Cesium.Cartesian2(0, -15),
+        pixelOffset: new Cesium.Cartesian2(0, -18),
       },
     });
 
-    gizmoEntities.push(polyline, label);
-    axes[axis] = { entity: polyline, graphics: polyline.polyline, label, color };
+    const scaleHandle = viewer.entities.add({
+      position: new Cesium.CallbackProperty(() => {
+        try {
+          const length = computeGizmoAxisLength(entity);
+          const points = getCachedAxisEndpoints(entity, axis, length, "local");
+          return points.end;
+        } catch (error) {
+          console.warn(`Gizmo scale handle 计算错误 (${axis}):`, error);
+          return Cesium.Cartesian3.ZERO;
+        }
+      }, false),
+      point: {
+        pixelSize: 12,
+        color: color.withAlpha(0.9),
+        outlineColor: Cesium.Color.WHITE.withAlpha(0.9),
+        outlineWidth: 2,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      },
+    });
+    scaleHandle.gizmoMetadata = {
+      mode: "scale",
+      axis,
+      axisSpace: "local",
+      kind: "scale",
+    };
+
+    const rotationArc = viewer.entities.add({
+      polyline: {
+        positions: new Cesium.CallbackProperty(() => computeAxisArc(entity, axis, baseRadius), false),
+        material: rotationColor.withAlpha(0.85),
+        width: 3,
+        arcType: Cesium.ArcType.NONE,
+      },
+    });
+    rotationArc.gizmoMetadata = {
+      mode: "rotate",
+      axis,
+      axisSpace: "local",
+      kind: "rotate",
+    };
+
+    gizmoEntities.push(polyline, label, scaleHandle, rotationArc);
+
+    axes[axis] = {
+      translate: { entity: polyline, graphics: polyline.polyline, color },
+      rotate: { entity: rotationArc, graphics: rotationArc.polyline, color: rotationColor },
+      scale: { entity: scaleHandle, graphics: scaleHandle.point, color },
+      label,
+    };
   });
 
   appState.gizmo = { entity, axes, type: "translate", viewRing: viewRingEntity };
+
 }
 
 function computeRotationRadius(entity) {
   const julianNow = Cesium.JulianDate.now();
-  const dimensions = entity.box.dimensions.getValue(julianNow);
+  const dimensions = getEntityDimensions(entity, julianNow);
   if (!dimensions) return 10.0;
   const maxDim = Math.max(dimensions.x, dimensions.y, dimensions.z);
   return Math.max(10.0, maxDim * 0.75);
@@ -1929,43 +2078,6 @@ function computeAxisArc(entity, axis, radius, segments = 48) {
     points.push(Cesium.Cartesian3.add(position, scaled, new Cesium.Cartesian3()));
   }
   return points;
-}
-
-function createRotationGizmo(entity) {
-  const radius = computeRotationRadius(entity);
-  const baseCircle = viewer.entities.add({
-    polyline: {
-      positions: new Cesium.CallbackProperty(() => computeViewAlignedCircle(entity, radius), false),
-      material: Cesium.Color.WHITE.withAlpha(0.65),
-      width: 2,
-      arcType: Cesium.ArcType.NONE,
-    },
-  });
-  gizmoEntities.push(baseCircle);
-
-  const axisColors = {
-    x: Cesium.Color.fromCssColorString("#ff6b6b"),
-    y: Cesium.Color.fromCssColorString("#88ff88"),
-    z: Cesium.Color.fromCssColorString("#5ab4ff"),
-  };
-
-  const axes = {};
-
-  ["x", "y", "z"].forEach((axis) => {
-    const color = axisColors[axis];
-    const polyline = viewer.entities.add({
-      polyline: {
-        positions: new Cesium.CallbackProperty(() => computeAxisArc(entity, axis, radius * 0.9), false),
-        material: color.withAlpha(0.8),
-        width: 3,
-        arcType: Cesium.ArcType.NONE,
-      },
-    });
-    gizmoEntities.push(polyline);
-    axes[axis] = { entity: polyline, graphics: polyline.polyline, color };
-  });
-
-  appState.gizmo = { entity, axes, type: "rotate" };
 }
 
 function updateRotationBasis(session) {
@@ -2326,19 +2438,19 @@ handler.setInputAction((click) => {
   }
 }, Cesium.ScreenSpaceEventType.RIGHT_CLICK);
 
-function beginTransform(mode) {
+function beginTransform(mode, options = {}) {
   if (!appState.selectedObject) return;
   const entity = appState.selectedObject;
   const julianNow = Cesium.JulianDate.now();
-  const initialDimensions = Cesium.Cartesian3.clone(
-    entity.box.dimensions.getValue(julianNow),
-    new Cesium.Cartesian3()
-  );
+  const dimensionValue = getEntityDimensions(entity, julianNow) || defaultCubeConfig.dimensions;
+  const initialDimensions = Cesium.Cartesian3.clone(dimensionValue, new Cesium.Cartesian3());
 
-  let activeAxis = appState.axisMode;
+  let activeAxis = options.axis ?? appState.axisMode;
   if (mode !== "translate" && isPlaneConstraint(activeAxis)) {
     activeAxis = "none";
   }
+
+  const axisSpace = options.axisSpace || appState.axisSpace;
 
   appState.transformSession = {
     mode,
@@ -2348,12 +2460,13 @@ function beginTransform(mode) {
     initialDimensions,
     activeAxis,
 
-    axisSpace: appState.axisSpace,
+    axisSpace,
     isShift: false,
     isCtrl: false,
     lastDirection: null,
     numericApplied: false,
-    lockProportion: false,
+    lockProportion: Boolean(options.lockProportion),
+    fromGizmo: Boolean(options.fromGizmo),
   };
 
   if (appState.objectMode === "edit" && appState.selectedComponent) {
