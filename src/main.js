@@ -2417,8 +2417,7 @@ handler.setInputAction(() => {
 }, Cesium.ScreenSpaceEventType.LEFT_UP);
 
 handler.setInputAction((click) => {
-  if (appState.mode === "translate" || appState.mode === "rotate" || appState.mode === "scale") {
-    commitTransform();
+  if (appState.transformSession) {
     return;
   }
   if (appState.cameraNavigationActive || appState.skipNextClick) {
@@ -2427,6 +2426,12 @@ handler.setInputAction((click) => {
   }
   handleSelection(click);
 }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+handler.setInputAction(() => {
+  if (appState.mode === "translate" || appState.mode === "rotate" || appState.mode === "scale") {
+    commitTransform();
+  }
+}, Cesium.ScreenSpaceEventType.LEFT_UP);
 
 handler.setInputAction((click) => {
   if (appState.mode === "translate" || appState.mode === "rotate" || appState.mode === "scale") {
