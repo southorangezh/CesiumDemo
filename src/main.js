@@ -1,3 +1,6 @@
+// 设置Cesium Ion访问令牌
+Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJjMjdkYThkNC05NWZkLTQ4YmYtOGI2MC1kNGM5MTJmYzAwNmQiLCJpZCI6MjM0NjM5LCJpYXQiOjE3MjM2MDYxOTR9.0WrwApMfIqf1Rvr3g3M-uw-IaZjmt9cGtF016_bnMzo';
+
 const viewer = new Cesium.Viewer("cesiumContainer", {
   baseLayerPicker: false,
   animation: false,
@@ -12,6 +15,71 @@ const viewer = new Cesium.Viewer("cesiumContainer", {
     url: Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII"),
   }),
 });
+
+// 确保 Cesium 容器尺寸正确
+function ensureCesiumContainerSize() {
+  const container = document.getElementById("cesiumContainer");
+  if (container) {
+    const rect = container.getBoundingClientRect();
+    if (rect.height > window.innerHeight || rect.width > window.innerWidth) {
+      console.warn("Cesium 容器尺寸异常，正在重置...");
+      container.style.height = "100%";
+      container.style.width = "100%";
+      container.style.maxHeight = "100vh";
+      container.style.maxWidth = "100vw";
+      
+      // 强制 Cesium 重新调整大小
+      if (viewer && viewer.scene && viewer.scene.canvas) {
+        viewer.scene.canvas.style.height = "100%";
+        viewer.scene.canvas.style.width = "100%";
+        viewer.scene.canvas.style.maxHeight = "100vh";
+        viewer.scene.canvas.style.maxWidth = "100vw";
+        viewer.resize();
+      }
+    }
+  }
+}
+
+// 监听窗口大小变化
+window.addEventListener('resize', () => {
+  ensureCesiumContainerSize();
+  if (viewer) {
+    viewer.resize();
+  }
+});
+
+// 页面加载完成后检查容器尺寸
+document.addEventListener('DOMContentLoaded', () => {
+  setTimeout(ensureCesiumContainerSize, 100);
+});
+
+// 定期检查容器尺寸（防止异常增长）
+setInterval(ensureCesiumContainerSize, 5000);
+
+// 定期清理无效缓存
+setInterval(() => {
+  // 清理轴端点缓存中的无效数据
+  for (const [key, data] of axisEndpointsCache) {
+    if (!isValidCachedData(data)) {
+      axisEndpointsCache.delete(key);
+    }
+  }
+  
+  // 清理几何缓存中的无效数据
+  for (const [key, data] of geometryCache) {
+    if (!data || !data.vertices || !data.edges || !data.faces) {
+      geometryCache.delete(key);
+    }
+  }
+  
+  // 清理材质缓存（材质缓存通常不会有无效数据，但为了安全起见）
+  if (materialCache.size > 200) {
+    const keys = Array.from(materialCache.keys());
+    for (let i = 0; i < 50; i++) {
+      materialCache.delete(keys[i]);
+    }
+  }
+}, 10000); // 每10秒清理一次
 
 viewer.scene.globe.depthTestAgainstTerrain = true;
 viewer.scene.globe.enableLighting = true;
@@ -209,16 +277,27 @@ updateSelectionFilterMessage();
 
 function getEntityPosition(entity, julian = Cesium.JulianDate.now(), result) {
   if (!entity) {
-    return result ? Cesium.Cartesian3.clone(Cesium.Cartesian3.ZERO, result) : new Cesium.Cartesian3();
+    return result ? Cesium.Cartesian3.clone(Cesium.Cartesian3.ZERO, result) : Cesium.Cartesian3.ZERO.clone();
   }
+  
   const { position } = entity;
+  let pos;
+  
   if (position && typeof position.getValue === "function") {
-    return position.getValue(julian, result || new Cesium.Cartesian3());
+    pos = position.getValue(julian, result || new Cesium.Cartesian3());
+  } else if (position) {
+    pos = Cesium.Cartesian3.clone(position, result || new Cesium.Cartesian3());
+  } else {
+    pos = Cesium.Cartesian3.ZERO.clone();
   }
-  if (position) {
-    return Cesium.Cartesian3.clone(position, result || new Cesium.Cartesian3());
+  
+  // 验证位置是否有效
+  if (!pos || !Cesium.defined(pos.x) || !Cesium.defined(pos.y) || !Cesium.defined(pos.z) ||
+      !isFinite(pos.x) || !isFinite(pos.y) || !isFinite(pos.z)) {
+    return result ? Cesium.Cartesian3.clone(Cesium.Cartesian3.ZERO, result) : Cesium.Cartesian3.ZERO.clone();
   }
-  return result ? Cesium.Cartesian3.clone(Cesium.Cartesian3.ZERO, result) : new Cesium.Cartesian3();
+  
+  return pos;
 }
 
 function getEntityOrientation(entity, julian = Cesium.JulianDate.now()) {
@@ -471,6 +550,9 @@ function showSelectionFilteredHint() {
   }, 2000);
 }
 
+// 材质缓存
+const materialCache = new Map();
+
 function applyMaterial(entity, options = {}) {
   if (!entity || !entity.cubeMetadata) return;
   if (appState.transformSession && appState.transformSession.entity === entity && options.force !== true) {
@@ -485,7 +567,6 @@ function applyMaterial(entity, options = {}) {
   const baseOpacityValue = metadata.runtimeOpacity ?? metadata.opacity ?? baseColor.alpha ?? 0.8;
   const baseOpacity = Cesium.Math.clamp(baseOpacityValue, 0.05, 1.0);
 
-
   let finalAlpha = baseOpacity;
   if (appState.viewSettings.xray) {
     finalAlpha = Math.min(finalAlpha, 0.35);
@@ -496,8 +577,23 @@ function applyMaterial(entity, options = {}) {
     finalAlpha = Math.min(finalAlpha, 1.0);
   }
 
+  // 创建材质缓存键
+  const materialKey = `${entity.id}_${baseColor.red}_${baseColor.green}_${baseColor.blue}_${finalAlpha}_${fillEnabled}_${outlineEnabled}_${options.selected}_${appState.viewSettings.xray}`;
+  
+  // 检查材质缓存
+  let material = materialCache.get(materialKey);
+  if (!material) {
+    material = new Cesium.ColorMaterialProperty(baseColor.withAlpha(finalAlpha));
+    // 限制缓存大小
+    if (materialCache.size > 100) {
+      const firstKey = materialCache.keys().next().value;
+      materialCache.delete(firstKey);
+    }
+    materialCache.set(materialKey, material);
+  }
+
   entity.box.fill = fillEnabled;
-  entity.box.material = new Cesium.ColorMaterialProperty(baseColor.withAlpha(finalAlpha));
+  entity.box.material = material;
   entity.box.outline = outlineEnabled || options.selected;
   const displayOutlineColor = options.selected ? Cesium.Color.ORANGE : outlineColor;
   entity.box.outlineColor = displayOutlineColor.withAlpha(appState.viewSettings.xray ? 0.6 : 1.0);
@@ -800,62 +896,111 @@ function createCube(position, options = {}) {
   return cubeEntity;
 }
 
+// 几何计算缓存
+const geometryCache = new Map();
+
 function computeCubeGeometry(entity) {
-  const julian = Cesium.JulianDate.now();
-  const dims = entity.box.dimensions.getValue(julian);
-  const half = new Cesium.Cartesian3(dims.x / 2, dims.y / 2, dims.z / 2);
-  const position = getEntityPosition(entity, julian, new Cesium.Cartesian3());
-  const orientation = getEntityOrientation(entity, julian);
-  const matrix = Cesium.Matrix3.fromQuaternion(orientation, new Cesium.Matrix3());
+  if (!entity || !entity.box) return { vertices: [], edges: [], faces: [] };
+  
+  try {
+    const julian = Cesium.JulianDate.now();
+    const dims = entity.box.dimensions.getValue(julian);
+    const position = getEntityPosition(entity, julian, new Cesium.Cartesian3());
+    const orientation = getEntityOrientation(entity, julian);
+    
+    // 验证输入数据
+    if (!dims || !Cesium.defined(dims.x) || !Cesium.defined(dims.y) || !Cesium.defined(dims.z) ||
+        !isFinite(dims.x) || !isFinite(dims.y) || !isFinite(dims.z) ||
+        dims.x <= 0 || dims.y <= 0 || dims.z <= 0) {
+      console.warn("无效的立方体尺寸:", dims);
+      return { vertices: [], edges: [], faces: [] };
+    }
+    
+    if (!position || !Cesium.defined(position.x) || !Cesium.defined(position.y) || !Cesium.defined(position.z) ||
+        !isFinite(position.x) || !isFinite(position.y) || !isFinite(position.z)) {
+      console.warn("无效的实体位置:", position);
+      return { vertices: [], edges: [], faces: [] };
+    }
+    
+    if (!orientation || !Cesium.defined(orientation.x) || !Cesium.defined(orientation.y) || 
+        !Cesium.defined(orientation.z) || !Cesium.defined(orientation.w) ||
+        !isFinite(orientation.x) || !isFinite(orientation.y) || !isFinite(orientation.z) || !isFinite(orientation.w)) {
+      console.warn("无效的实体方向:", orientation);
+      return { vertices: [], edges: [], faces: [] };
+    }
+    
+    // 创建缓存键
+    const cacheKey = `${entity.id}_${dims.x}_${dims.y}_${dims.z}_${position.x}_${position.y}_${position.z}_${orientation.x}_${orientation.y}_${orientation.z}_${orientation.w}`;
+    
+    // 检查缓存
+    if (geometryCache.has(cacheKey)) {
+      return geometryCache.get(cacheKey);
+    }
+  
+    const half = new Cesium.Cartesian3(dims.x / 2, dims.y / 2, dims.z / 2);
+    const matrix = Cesium.Matrix3.fromQuaternion(orientation, new Cesium.Matrix3());
 
-  const vertices = VERTEX_SIGNS.map((signs, index) => {
-    const local = new Cesium.Cartesian3(half.x * signs.x, half.y * signs.y, half.z * signs.z);
-    const rotated = Cesium.Matrix3.multiplyByVector(matrix, local, new Cesium.Cartesian3());
-    const world = Cesium.Cartesian3.add(position, rotated, new Cesium.Cartesian3());
-    return {
-      index,
-      position: world,
-      signs,
-    };
-  });
+    const vertices = VERTEX_SIGNS.map((signs, index) => {
+      const local = new Cesium.Cartesian3(half.x * signs.x, half.y * signs.y, half.z * signs.z);
+      const rotated = Cesium.Matrix3.multiplyByVector(matrix, local, new Cesium.Cartesian3());
+      const world = Cesium.Cartesian3.add(position, rotated, new Cesium.Cartesian3());
+      return {
+        index,
+        position: world,
+        signs,
+      };
+    });
 
-  const faces = FACE_DEFS.map((def, index) => {
-    const faceVertices = def.vertices.map((vertexIndex) => vertices[vertexIndex].position);
-    const center = faceVertices.reduce(
-      (acc, current) => Cesium.Cartesian3.add(acc, current, acc),
-      new Cesium.Cartesian3()
-    );
-    Cesium.Cartesian3.divideByScalar(center, faceVertices.length, center);
-    return {
-      index,
-      vertices: faceVertices,
-      center,
-      signs: def.signs,
-      normal: computeWorldDirectionFromSigns(def.signs, entity),
-    };
-  });
+    const faces = FACE_DEFS.map((def, index) => {
+      const faceVertices = def.vertices.map((vertexIndex) => vertices[vertexIndex].position);
+      const center = faceVertices.reduce(
+        (acc, current) => Cesium.Cartesian3.add(acc, current, acc),
+        new Cesium.Cartesian3()
+      );
+      Cesium.Cartesian3.divideByScalar(center, faceVertices.length, center);
+      return {
+        index,
+        vertices: faceVertices,
+        center,
+        signs: def.signs,
+        normal: computeWorldDirectionFromSigns(def.signs, entity),
+      };
+    });
 
-  const edges = EDGE_DEFS.map((def, index) => {
-    const [startIndex, endIndex] = def.vertices;
-    const start = vertices[startIndex];
-    const end = vertices[endIndex];
-    const center = Cesium.Cartesian3.midpoint(start.position, end.position, new Cesium.Cartesian3());
-    const signs = {
-      x: Math.sign((start.signs.x || 0) + (end.signs.x || 0)),
-      y: Math.sign((start.signs.y || 0) + (end.signs.y || 0)),
-      z: Math.sign((start.signs.z || 0) + (end.signs.z || 0)),
-    };
-    return {
-      index,
-      start: start.position,
-      end: end.position,
-      center,
-      signs,
-      normal: computeWorldDirectionFromSigns(signs, entity),
-    };
-  });
+    const edges = EDGE_DEFS.map((def, index) => {
+      const [startIndex, endIndex] = def.vertices;
+      const start = vertices[startIndex];
+      const end = vertices[endIndex];
+      const center = Cesium.Cartesian3.midpoint(start.position, end.position, new Cesium.Cartesian3());
+      const signs = {
+        x: Math.sign((start.signs.x || 0) + (end.signs.x || 0)),
+        y: Math.sign((start.signs.y || 0) + (end.signs.y || 0)),
+        z: Math.sign((start.signs.z || 0) + (end.signs.z || 0)),
+      };
+      return {
+        index,
+        start: start.position,
+        end: end.position,
+        center,
+        signs,
+        normal: computeWorldDirectionFromSigns(signs, entity),
+      };
+    });
 
-  return { vertices, edges, faces };
+    const result = { vertices, edges, faces };
+    
+    // 缓存结果，限制缓存大小
+    if (geometryCache.size > 50) {
+      const firstKey = geometryCache.keys().next().value;
+      geometryCache.delete(firstKey);
+    }
+    geometryCache.set(cacheKey, result);
+    
+    return result;
+  } catch (error) {
+    console.error("几何计算错误:", error);
+    return { vertices: [], edges: [], faces: [] };
+  }
 }
 
 function removeObjectById(id) {
@@ -866,6 +1011,23 @@ function removeObjectById(id) {
   }
   const removed = viewer.entities.remove(entity);
   appState.objects.delete(id);
+  
+  // 清理几何缓存中相关的条目
+  if (entity && entity.id) {
+    for (const [key] of geometryCache) {
+      if (key.startsWith(`${entity.id}_`)) {
+        geometryCache.delete(key);
+      }
+    }
+    
+    // 清理材质缓存中相关的条目
+    for (const [key] of materialCache) {
+      if (key.startsWith(`${entity.id}_`)) {
+        materialCache.delete(key);
+      }
+    }
+  }
+  
   return removed;
 }
 
@@ -1350,15 +1512,37 @@ function removeGizmo() {
   gizmoEntities.forEach((e) => viewer.entities.remove(e));
   gizmoEntities = [];
   appState.gizmo = null;
+  
+  // 清理轴端点缓存
+  axisEndpointsCache.clear();
 }
 
 function computeAxisEndpoints(entity, axis, length = 20.0) {
+  if (!entity) {
+    return { start: Cesium.Cartesian3.ZERO, end: Cesium.Cartesian3.ZERO };
+  }
+  
   const julianNow = Cesium.JulianDate.now();
   const position = getEntityPosition(entity, julianNow, new Cesium.Cartesian3());
+  
+  // 检查位置是否有效
+  if (!position || !Cesium.defined(position.x) || !Cesium.defined(position.y) || !Cesium.defined(position.z)) {
+    return { start: Cesium.Cartesian3.ZERO, end: Cesium.Cartesian3.ZERO };
+  }
 
   const baseMatrix = getEastNorthUpMatrix(position);
+  if (!baseMatrix) {
+    return { start: position, end: position };
+  }
+  
   const index = axis === "x" ? 0 : axis === "y" ? 1 : 2;
   const axisVector = Cesium.Matrix4.getColumn(baseMatrix, index, new Cesium.Cartesian3());
+  
+  // 检查轴向量是否有效
+  if (!axisVector || !Cesium.defined(axisVector.x) || !Cesium.defined(axisVector.y) || !Cesium.defined(axisVector.z)) {
+    return { start: position, end: position };
+  }
+  
   Cesium.Cartesian3.normalize(axisVector, axisVector);
   const endPoint = Cesium.Cartesian3.add(
     position,
@@ -1366,6 +1550,18 @@ function computeAxisEndpoints(entity, axis, length = 20.0) {
     new Cesium.Cartesian3()
   );
   return { start: position, end: endPoint };
+}
+
+// 缓存轴端点计算结果
+const axisEndpointsCache = new Map();
+
+// 验证缓存数据的有效性
+function isValidCachedData(data) {
+  if (!data || !data.entity || !data.points) return false;
+  if (!data.points.start || !data.points.end) return false;
+  if (!Cesium.defined(data.points.start.x) || !Cesium.defined(data.points.start.y) || !Cesium.defined(data.points.start.z)) return false;
+  if (!Cesium.defined(data.points.end.x) || !Cesium.defined(data.points.end.y) || !Cesium.defined(data.points.end.z)) return false;
+  return true;
 }
 
 function ensureGizmo(entity) {
@@ -1390,11 +1586,40 @@ function ensureGizmo(entity) {
 
   ["x", "y", "z"].forEach((axis) => {
     const color = axisColors[axis];
+    
+    // 使用缓存的轴端点计算
+    const cacheKey = `${entity.id}_${axis}`;
+    let cachedEndpoints = null;
+    
     const polyline = viewer.entities.add({
       polyline: {
         positions: new Cesium.CallbackProperty(() => {
-          const points = computeAxisEndpoints(entity, axis);
-          return [points.start, points.end];
+          try {
+            // 检查缓存
+            if (axisEndpointsCache.has(cacheKey)) {
+              const cachedData = axisEndpointsCache.get(cacheKey);
+              if (isValidCachedData(cachedData) && cachedData.entity === entity) {
+                return [cachedData.points.start, cachedData.points.end];
+              } else {
+                // 清理无效缓存
+                axisEndpointsCache.delete(cacheKey);
+              }
+            }
+            
+            const points = computeAxisEndpoints(entity, axis);
+            // 验证计算结果
+            if (!points || !points.start || !points.end) {
+              return [Cesium.Cartesian3.ZERO, Cesium.Cartesian3.ZERO];
+            }
+            
+            // 更新缓存
+            axisEndpointsCache.set(cacheKey, { entity, points });
+            cachedEndpoints = points;
+            return [points.start, points.end];
+          } catch (error) {
+            console.warn(`Gizmo polyline 计算错误 (${axis}):`, error);
+            return [Cesium.Cartesian3.ZERO, Cesium.Cartesian3.ZERO];
+          }
         }, false),
         material: color.withAlpha(0.7),
         width: 3,
@@ -1403,8 +1628,30 @@ function ensureGizmo(entity) {
 
     const label = viewer.entities.add({
       position: new Cesium.CallbackProperty(() => {
-        const points = computeAxisEndpoints(entity, axis);
-        return points.end;
+        try {
+          // 使用相同的缓存逻辑
+          if (axisEndpointsCache.has(cacheKey)) {
+            const cachedData = axisEndpointsCache.get(cacheKey);
+            if (isValidCachedData(cachedData) && cachedData.entity === entity) {
+              return cachedData.points.end;
+            } else {
+              // 清理无效缓存
+              axisEndpointsCache.delete(cacheKey);
+            }
+          }
+          
+          const points = computeAxisEndpoints(entity, axis);
+          if (!points || !points.end) {
+            return Cesium.Cartesian3.ZERO;
+          }
+          
+          axisEndpointsCache.set(cacheKey, { entity, points });
+          cachedEndpoints = points;
+          return points.end;
+        } catch (error) {
+          console.warn(`Gizmo label 计算错误 (${axis}):`, error);
+          return Cesium.Cartesian3.ZERO;
+        }
       }, false),
       label: {
         text: axis.toUpperCase(),
@@ -2413,11 +2660,87 @@ canvas.addEventListener(
 );
 
 
-viewer.scene.postRender.addEventListener(() => {
-  if (appState.selectedObject) {
-    updateGizmoPosition();
+// 移除不必要的每帧更新 - updateGizmoPosition 只在需要时调用
+
+// 性能监控工具
+const performanceMonitor = {
+  frameCount: 0,
+  lastTime: performance.now(),
+  frameTimes: [],
+  maxFrameTime: 0,
+  averageFrameTime: 0,
+  
+  start() {
+    this.frameCount = 0;
+    this.lastTime = performance.now();
+    this.frameTimes = [];
+    this.maxFrameTime = 0;
+    this.averageFrameTime = 0;
+  },
+  
+  update() {
+    const currentTime = performance.now();
+    const frameTime = currentTime - this.lastTime;
+    
+    this.frameCount++;
+    this.frameTimes.push(frameTime);
+    
+    if (frameTime > this.maxFrameTime) {
+      this.maxFrameTime = frameTime;
+    }
+    
+    // 保持最近100帧的记录
+    if (this.frameTimes.length > 100) {
+      this.frameTimes.shift();
+    }
+    
+    this.averageFrameTime = this.frameTimes.reduce((a, b) => a + b, 0) / this.frameTimes.length;
+    this.lastTime = currentTime;
+    
+    // 如果帧时间过长，输出警告
+    // if (frameTime > 16.67) { // 超过60fps的阈值
+    //   console.warn(`[性能警告] 帧时间过长: ${frameTime.toFixed(2)}ms (目标: 16.67ms)`);
+    // }
+  },
+  
+  getStats() {
+    return {
+      frameCount: this.frameCount,
+      averageFrameTime: this.averageFrameTime.toFixed(2),
+      maxFrameTime: this.maxFrameTime.toFixed(2),
+      currentFPS: (1000 / this.averageFrameTime).toFixed(1),
+      cacheStats: {
+        geometryCache: geometryCache.size,
+        materialCache: materialCache.size,
+        axisEndpointsCache: axisEndpointsCache.size
+      }
+    };
+  },
+  
+  logStats() {
+    const stats = this.getStats();
+    console.log('[性能统计]', stats);
   }
+};
+
+// 启动性能监控
+performanceMonitor.start();
+
+// 每帧更新性能监控
+viewer.scene.postRender.addEventListener(() => {
+  performanceMonitor.update();
 });
+
+// 添加全局性能监控函数
+window.getPerformanceStats = () => performanceMonitor.getStats();
+window.logPerformanceStats = () => performanceMonitor.logStats();
+
+// 每5秒输出一次性能统计（仅在开发模式下）
+if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+  setInterval(() => {
+    performanceMonitor.logStats();
+  }, 5000);
+}
 
 updateModeIndicator();
 updateAxisIndicator();
