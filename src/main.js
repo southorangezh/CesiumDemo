@@ -16,6 +16,15 @@ const viewer = new Cesium.Viewer("cesiumContainer", {
   }),
 });
 
+const DEFAULT_SAFE_POSITION = Cesium.Cartesian3.fromDegrees(0, 0, 100);
+
+function cloneDefaultPosition(result) {
+  if (Cesium.defined(result)) {
+    return Cesium.Cartesian3.clone(DEFAULT_SAFE_POSITION, result);
+  }
+  return Cesium.Cartesian3.clone(DEFAULT_SAFE_POSITION);
+}
+
 // 确保 Cesium 容器尺寸正确
 function ensureCesiumContainerSize() {
   const container = document.getElementById("cesiumContainer");
@@ -423,7 +432,7 @@ updateSelectionFilterMessage();
 
 function getEntityPosition(entity, julian = Cesium.JulianDate.now(), result) {
   if (!entity) {
-    return result ? Cesium.Cartesian3.clone(Cesium.Cartesian3.ZERO, result) : Cesium.Cartesian3.ZERO.clone();
+    return cloneDefaultPosition(result);
   }
   
   const { position } = entity;
@@ -440,9 +449,14 @@ function getEntityPosition(entity, julian = Cesium.JulianDate.now(), result) {
   // 验证位置是否有效
   if (!pos || !Cesium.defined(pos.x) || !Cesium.defined(pos.y) || !Cesium.defined(pos.z) ||
       !isFinite(pos.x) || !isFinite(pos.y) || !isFinite(pos.z)) {
-    return result ? Cesium.Cartesian3.clone(Cesium.Cartesian3.ZERO, result) : Cesium.Cartesian3.ZERO.clone();
+    return cloneDefaultPosition(result);
   }
-  
+
+  const magnitudeSquared = Cesium.Cartesian3.magnitudeSquared(pos);
+  if (!isFinite(magnitudeSquared) || magnitudeSquared === 0) {
+    return cloneDefaultPosition(result);
+  }
+
   return pos;
 }
 
